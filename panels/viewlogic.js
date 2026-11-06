@@ -11,6 +11,10 @@
 // Two rule levels (design-v2 "Two rule levels"): the host sends `levels`, one per level (project,
 // global) with its folder, entries, hash and playbook files. Every edit names its level; a rule's
 // playbook is one of its own level's files, and an id is unique within its level only.
+//
+// 0.3.0: the form has a kind (a session with a playbook, or an act rule running one of the item's own
+// actions with no session) and, for a session, a mode (investigate, or act with the playbook's "Allowed
+// actions"); each level's base.md is shown with an edit entry beside its playbooks.
 
 const S = typeof AutopilotSchema !== 'undefined' ? AutopilotSchema : require('../dist/lib/schema')
 
@@ -68,6 +72,8 @@ function logModel(e, now) {
   // A run event (lib/runs.js: a tab closed, a restored tab re-adopted, an early end): its note.
   if (e.note) return { kind: 'switch', when, title: String(e.title || e.itemId || ''), meta: `${e.rule} · ${e.source}`, outcome: String(e.note) }
   const score = typeof e.score === 'number' ? ` ${e.score.toFixed(2)}` : ''
+  // An act rule's action that ran (0.3.0): a fire with what it did, "marked read: <title>".
+  if (e.step === 'act' && e.outcome) return { kind: 'fired', when, title: String(e.title || e.itemId || ''), meta: `${e.rule} · ${e.source}`, outcome: `${e.outcome}${Array.isArray(e.also) && e.also.length ? `; also matched: ${e.also.join(', ')}` : ''}` }
   return {
     kind: e.tabId ? 'fired' : 'skipped',
     when,
@@ -334,6 +340,11 @@ function sourceChoices(state, ids) {
 const sourceToggle = (ids, id, on) => (on ? (ids.includes(id) ? ids : [...ids, id]) : ids.filter((x) => x !== id))
 
 const OUTSIDERS = 'Outsiders can trigger this rule: anyone can send you mail that matches, and the session reads what they wrote. Keep the playbook narrow and name the places it may check itself.'
+// An act rule reads nothing with a model, but a stranger can still make a mail match and have the action
+// run on it (a mail marked read before the person saw it): the conditions are the only gate.
+const OUTSIDERS_ACT = 'Outsiders can trigger this rule: anyone can send you mail that matches, and the action runs on it with nobody looking (a mail marked read is one you may never see). Make the conditions name the sender.'
+/** The note under the sources: OUTSIDERS for a session rule, OUTSIDERS_ACT for an act rule, '' when outsiders cannot trigger it. */
+const outsidersNote = (f, state) => (outsidersCan(f.sourceAny ? [S.ANY_SOURCE] : f.sources, state) ? (f.kind === 'act' ? OUTSIDERS_ACT : OUTSIDERS) : '')
 
 /**
  * Whether people outside the person can put an item in front of this rule: `["*"]` (any source
@@ -375,6 +386,23 @@ function supportNote(takeover) {
   return ''
 }
 
+// ---- kind and mode (0.3.0) ----
+
+/** The well-known action ids the act field offers (a source may add its own; the field takes any id). */
+const ACT_CHOICES = Object.freeze(['markRead', 'markUnread', 'done'])
+
+const MODE_WARN = 'Act mode: the session may carry out the actions its playbook lists under "Allowed actions", on this item, with nobody watching. List each action with its exact target; Claude Code\'s own permission settings still apply in the tab.'
+const MODE_WARN_OUTSIDERS = 'Act mode on a rule outsiders can trigger: a stranger\'s message starts a session that may carry out the playbook\'s actions. The frame tells it never to take an action or a target from the item, but keep the Allowed actions few and harmless, or use Investigate here.'
+
+/**
+ * The warning under the mode choice: none for investigate or an act rule (no session); act mode warns,
+ * and more strongly when outsiders can trigger the rule (outsidersCan, the same test as the row flag).
+ */
+function modeWarning(f, state) {
+  if (f.kind === 'act' || f.mode !== 'act') return ''
+  return outsidersCan(f.sourceAny ? [S.ANY_SOURCE] : f.sources, state) ? MODE_WARN_OUTSIDERS : MODE_WARN
+}
+
 /**
  * The form's model from a raw entry (an edit; any shape, an invalid one included) or null (a new
  * rule: off, so it fires only once the person has tried it and switched it on), for a rule of `level`
@@ -389,8 +417,13 @@ function formFromRaw(raw, state, level) {
   const ids = strList(r.sources)
   const pbs = (state && levelState(state, level).playbookFiles) || []
   const firstPb = pbs.find((p) => !p.invalid)
+  // An act rule: `act` and no playbook (an entry with both is judged a session rule, and its error shows).
+  const isAct = r.act !== undefined && r.playbook === undefined
   return {
     level,
+    kind: isAct ? 'act' : 'session',
+    act: isAct ? str(r.act) : '',
+    mode: r.mode === undefined ? S.MODE_DEFAULT : str(r.mode),
     id: str(r.id),
     name: str(r.name),
     enabled: raw ? r.enabled !== false : false,
@@ -407,7 +440,8 @@ function formFromRaw(raw, state, level) {
     hoursMode: h ? 'set' : 'any',
     hoursFrom: h ? str(h.from) : '22:00',
     hoursTo: h ? str(h.to) : '07:00',
-    playbook: raw ? str(r.playbook) : firstPb ? firstPb.name : NEW_PLAYBOOK,
+    // An act rule has none: the level's first one is there if the person switches it to a session.
+    playbook: raw && !isAct ? str(r.playbook) : firstPb ? firstPb.name : NEW_PLAYBOOK,
     newPlaybook: '',
     check: str(r.check),
     model: str(r.model),
@@ -426,9 +460,12 @@ function numOf(v) {
   return /^-?(\d+\.?\d*|\.\d+)$/.test(t) ? Number(t) : t
 }
 
-/** The raw rule the form stands for, in the order it is written (schema.js canonicalRule). */
+/**
+ * The raw rule the form stands for, in the order it is written (schema.js canonicalRule). An act rule
+ * keeps none of the session fields the form still holds (switching the kind back keeps them typed).
+ */
 function formToRule(f) {
-  const rule = {
+  const common = {
     id: f.id.trim(),
     name: f.name,
     enabled: f.enabled,
@@ -436,12 +473,19 @@ function formToRule(f) {
     when: f.when,
     ...(f.jevOn ? { jev: { question: f.question, min: numOf(f.min) } } : {}),
     ...(f.hoursMode === 'set' ? { hours: { from: f.hoursFrom, to: f.hoursTo } } : {}),
+  }
+  const limits = { perDay: numOf(f.perDay), cooldownMinutes: numOf(f.cooldownMinutes) }
+  // An empty action stays a key, so the loader's own "act must be an action id" is the error shown.
+  if (f.kind === 'act') return S.canonicalRule({ ...common, act: str(f.act).trim() || ' ', limits }, null)
+  const rule = {
+    ...common,
     playbook: f.playbook === NEW_PLAYBOOK ? f.newPlaybook.trim() : f.playbook,
+    mode: f.mode,
     check: f.check,
     model: f.model,
     effort: f.effort,
     onChange: f.onChange,
-    limits: { perDay: numOf(f.perDay), cooldownMinutes: numOf(f.cooldownMinutes) },
+    limits,
   }
   return S.canonicalRule(rule, null)
 }
@@ -463,7 +507,7 @@ function formErrors(f, state, editIndex) {
   for (const e of S.checkRule(rule).errors) if (!out[e.field]) out[e.field] = e.message
   if (!out.id && (lv.entries || []).some((e) => e.index !== editIndex && e.id === rule.id)) out.id = `id ${S.quote(rule.id)} is used by another ${f.level} rule`
   if (!out.when && !f.when.length && !f.jevOn && !f.confirmAll) out.when = CONFIRM_ALL
-  if (f.playbook === NEW_PLAYBOOK) {
+  if (f.kind !== 'act' && f.playbook === NEW_PLAYBOOK) {
     if (!f.newPlaybook.trim()) out.playbook = 'name the new playbook'
     else if ((lv.playbookFiles || []).some((p) => p.name === rule.playbook)) out.playbook = `a playbook ${rule.playbook} exists: pick it in the list`
   }
@@ -500,6 +544,32 @@ function playbookErrors(p, state) {
   else if (utf8Length(p.body) > S.MAX_PLAYBOOK_BYTES) out.body = `over ${S.MAX_PLAYBOOK_BYTES / 1024} KiB`
   return out
 }
+
+// ---- base.md (0.3.0) ----
+
+/**
+ * One row per level with a folder: whether its base.md is in use (and its size), its problem, whether
+ * the editor may open it (a level whose folder exists or can be made, as for playbooks).
+ */
+function baseRows(state) {
+  return levelsOf(state).filter((l) => l.folder).map((l) => ({
+    level: l.level,
+    label: `${l.label} ${S.BASE_FILE}`,
+    inUse: Boolean(l.base),
+    text: l.baseProblem ? 'cannot be used: no session opens until it is fixed' : l.base ? `in use: every session prompt carries it (${sizeLabel(l.base.size)})` : 'not set: sessions get no standing instructions from this level',
+    problem: l.baseProblem || '',
+    canEdit: l.folderState !== 'off',
+  }))
+}
+
+/** "512 bytes" under 1 KiB, else "3 KiB" (a short base.md reads as "1 KiB" otherwise). */
+const sizeLabel = (n) => (n < 1024 ? `${n || 0} bytes` : `${Math.round(n / 1024)} KiB`)
+
+/** The base.md editor's error (`{ body? }`): only the size cap; an empty text is allowed (it removes the file). */
+function baseErrors(body) {
+  return utf8Length(str(body)) > S.MAX_BASE_BYTES ? { body: `over ${S.MAX_BASE_BYTES / 1024} KiB` } : {}
+}
+const baseSizeText = (body) => `${(utf8Length(str(body)) / 1024).toFixed(1)} of ${S.MAX_BASE_BYTES / 1024} KiB`
 
 /** "3.2 of 64 KiB" under the editor. */
 const sizeText = (body) => `${(utf8Length(body) / 1024).toFixed(1)} of ${S.MAX_PLAYBOOK_BYTES / 1024} KiB`
@@ -539,9 +609,10 @@ function createRenderGate(draw, defer = (fn) => setTimeout(fn, 0)) {
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     clockText, switchModel, problemLines, hintLines, levelsOf, levelState, writableLevels, folderRows, logModel, dryModel,
-    TABS, tabsModel, folderModel, ruleRows, runningModel, confirmText, OUTSIDERS, OUTSIDERS_SHORT,
+    TABS, tabsModel, folderModel, ruleRows, runningModel, confirmText, OUTSIDERS, OUTSIDERS_ACT, outsidersNote, OUTSIDERS_SHORT,
     NEW_PLAYBOOK, playbookOptions, choiceOptions, supportNote, sourceChoices, sourceToggle, outsidersCan, formFromRaw, formToRule, formErrors, numOf,
     condTable, condDefault, condAdd, condRemove, condSet, condValueText, condParse, condControl, condFieldOptions, condOpOptions, COND_OP_LABELS,
     playbookRows, deleteBlocked, playbookErrors, sizeText, playbookTemplate, createRenderGate,
+    ACT_CHOICES, MODE_WARN, MODE_WARN_OUTSIDERS, modeWarning, baseRows, baseErrors, baseSizeText,
   }
 }

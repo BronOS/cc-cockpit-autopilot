@@ -375,3 +375,69 @@ test('the tabs stay on one row at a 460 px panel: no wrap, a sideways scroll wit
   const width = labels.reduce((a, l) => a + l.length * size * 0.55 + pad, 0)
   assert.ok(width < 440, `about ${Math.round(width)} px`)
 })
+
+// ---- 0.3.0: act rules, mode, base.md ----
+
+test('the rule form: an act rule round-trips with no session keys; an empty action shows the loader\'s error', () => {
+  const raw = { id: 'mr', enabled: false, sources: ['bronos.gmail'], when: [{ field: 'title', op: 'contains', value: 'Done' }], act: 'markRead', limits: { perDay: 100, cooldownMinutes: 0 } }
+  const f = V.formFromRaw(raw, ST, 'project')
+  assert.deepEqual([f.kind, f.act, f.mode], ['act', 'markRead', 'investigate'])
+  assert.deepEqual(V.formToRule(f), raw)
+  // Session fields left in the form from before the kind changed are not written.
+  assert.deepEqual(V.formToRule({ ...f, playbook: 'check', model: 'sonnet', effort: 'low', check: 'c', onChange: true, mode: 'act' }), raw)
+  assert.deepEqual(V.formErrors(f, ST, null), {})
+  assert.ok(V.formErrors({ ...f, act: '' }, ST, null).act)
+  assert.ok(V.formErrors({ ...f, act: 'open' }, ST, null).act)
+  // The "New playbook…" check is a session rule's only.
+  assert.deepEqual(V.formErrors({ ...f, playbook: V.NEW_PLAYBOOK, newPlaybook: '' }, ST, null), {})
+  // Switched to a session rule: a playbook and no act; act mode kept, the default left out.
+  const s = V.formToRule({ ...f, kind: 'session', playbook: 'check', mode: 'act' })
+  assert.deepEqual([s.act, s.playbook, s.mode], [undefined, 'check', 'act'])
+  assert.equal('mode' in V.formToRule({ ...f, kind: 'session', playbook: 'check', mode: 'investigate' }), false)
+  assert.deepEqual(V.ACT_CHOICES, ['markRead', 'markUnread', 'done'])
+  assert.equal(V.ACT_CHOICES.includes('open'), false)
+})
+
+test('the mode warning: none for investigate or an act rule; act mode warns, more strongly when outsiders can trigger the rule', () => {
+  const f = V.formFromRaw(null, ST, 'project')
+  assert.equal(V.modeWarning({ ...f, mode: 'investigate', sources: ['bronos.gmail'] }, ST), '')
+  assert.equal(V.modeWarning({ ...f, kind: 'act', mode: 'act', sources: ['bronos.gmail'] }, ST), '')
+  assert.equal(V.modeWarning({ ...f, mode: 'act', sources: ['bronos.jira'] }, ST), V.MODE_WARN)
+  assert.equal(V.modeWarning({ ...f, mode: 'act', sources: ['bronos.gmail'] }, ST), V.MODE_WARN_OUTSIDERS)
+  assert.equal(V.modeWarning({ ...f, mode: 'act', sourceAny: true, sources: [] }, ST), V.MODE_WARN_OUTSIDERS)
+  assert.match(V.MODE_WARN, /Claude Code's own permission settings still apply/)
+})
+
+test('base.md rows: per level with a folder; in use, not set, or a problem; the editor\'s cap', () => {
+  const st = { ...ST, levels: [{ ...LV, base: { size: 3000 }, baseProblem: null }, { ...GL, folder: '/g', folderState: 'ok', base: null, baseProblem: 'base.md: over 16 KiB' }] }
+  const rows = V.baseRows(st)
+  assert.deepEqual(rows.map((r) => [r.level, r.label, r.inUse, r.canEdit]), [['project', 'Project base.md', true, true], ['global', 'Global base.md', false, true]])
+  assert.match(rows[0].text, /^in use: every session prompt carries it \(3 KiB\)$/)
+  assert.match(rows[1].text, /cannot be used: no session opens until it is fixed/)
+  assert.equal(rows[1].problem, 'base.md: over 16 KiB')
+  assert.match(V.baseRows(withLv({ base: null }))[0].text, /^not set/)
+  assert.equal(V.baseRows(ST).length, 1, 'a level with no folder has no row')
+  assert.deepEqual(V.baseErrors(''), {}, 'an empty text is allowed: it removes the file')
+  assert.deepEqual(V.baseErrors('x'.repeat(S.MAX_BASE_BYTES)), {})
+  assert.deepEqual(V.baseErrors('x'.repeat(S.MAX_BASE_BYTES + 1)), { body: 'over 16 KiB' })
+  assert.equal(V.baseSizeText('x'.repeat(2048)), '2.0 of 16 KiB')
+})
+
+test('log rows: an act rule\'s action that ran is a fire with its outcome; a failed one a skip', () => {
+  const done = V.logModel({ at: NOW, rule: 'project:mr', source: 'bronos.gmail', itemId: 'm1', title: 'Ticket Done', step: 'act', act: 'markRead', outcome: 'marked read: Ticket Done', also: ['global:x'] }, NOW)
+  assert.deepEqual(done, { kind: 'fired', when: '13:42', title: 'Ticket Done', meta: 'project:mr · bronos.gmail', outcome: 'marked read: Ticket Done; also matched: global:x' })
+  const failed = V.logModel({ at: NOW, rule: 'project:mr', source: 'bronos.gmail', itemId: 'm1', title: 'Ticket Done', step: 'act', skip: 'markRead failed: no such item' }, NOW)
+  assert.deepEqual([failed.kind, failed.outcome], ['skipped', 'skipped (act): markRead failed: no such item'])
+})
+
+test('the sources note is worded per kind; an act rule keeps a playbook ready for a switch to a session; base sizes in bytes', () => {
+  const f = V.formFromRaw({ id: 'mr', sources: ['bronos.gmail'], act: 'markRead' }, ST, 'project')
+  assert.equal(f.playbook, 'check', 'the level\'s first playbook, not an empty pick')
+  assert.equal(V.outsidersNote(f, ST), V.OUTSIDERS_ACT)
+  assert.equal(V.outsidersNote({ ...f, kind: 'session' }, ST), V.OUTSIDERS)
+  assert.equal(V.outsidersNote({ ...f, sources: ['bronos.jira'] }, ST), '')
+  assert.doesNotMatch(V.OUTSIDERS_ACT, /session/)
+  const row = (size) => V.baseRows(withLv({ base: { size } }))[0].text
+  assert.match(row(10), /\(10 bytes\)$/)
+  assert.match(row(3000), /\(3 KiB\)$/)
+})

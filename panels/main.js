@@ -15,9 +15,13 @@
 // and a redraw replaces every element. So while the rule form or the playbook editor is open the
 // page is not redrawn at all (the state is kept and shows when the form closes), and otherwise a
 // redraw waits while a mouse button is down (viewlogic.js createRenderGate, as in Inbox).
+//
+// 0.3.0: the rule form picks what a rule does (a session with a playbook and a mode, or one of the
+// item's own actions with no session), and the Playbooks tab shows each level's base.md with an editor
+// (`openBase` / `saveBase`, the same hash check as a playbook; an empty text removes the file).
 
 let state = null
-const ui = { tab: 'rules', confirm: null, notice: null, noticeKind: 'error', busy: null, form: null, pb: null, formMsg: null }
+const ui = { tab: 'rules', confirm: null, notice: null, noticeKind: 'error', busy: null, form: null, pb: null, base: null, formMsg: null }
 let noticeTimer = null
 let reqSeq = 0
 const pending = new Map()
@@ -29,7 +33,7 @@ document.addEventListener('pointercancel', () => gate.up(), true)
 
 const root = () => document.getElementById('root')
 const post = (type, extra) => ccPanel.post({ type, ...extra })
-const formOpen = () => Boolean(ui.form || ui.pb)
+const formOpen = () => Boolean(ui.form || ui.pb || ui.base)
 
 /** Post an edit; `done(result)` runs when the host answers it. */
 function request(type, extra, done) {
@@ -354,7 +358,11 @@ function ruleFormView() {
       })
       srcBox.append(el('label', { class: `src${c.known ? '' : ' gone'}` }, box, el('span', { text: c.label })))
     }
-    outsiders.textContent = outsidersCan(m.sourceAny ? [S.ANY_SOURCE] : m.sources, state) ? OUTSIDERS : ''
+    showOutsiders()
+  }
+  // Worded per kind (an act rule runs its action, no session reads anything): redrawn on a kind change too.
+  function showOutsiders() {
+    outsiders.textContent = outsidersNote(m, state)
     outsiders.hidden = !outsiders.textContent
   }
   drawSources()
@@ -484,18 +492,47 @@ function ruleFormView() {
   newName.append(row('New playbook name', 'letters, digits, "_" or "-"; it opens in the editor after Save', text('newPlaybook', 'playbook', { maxlength: 64 }), null))
   showNew()
   const note = supportNote(state.takeover)
-  page.append(el('h3', { text: 'Session' }), el('div', { class: 'card' },
+  // What the rule does: a session (playbook, mode, check, model, effort, again on change) or one of the
+  // item's own actions (no session: none of those). Switching keeps what was typed in the other half.
+  const actRows = el('div', {})
+  const actInput = text('act', 'act', { maxlength: 40, list: 'ap-act-choices', placeholder: 'markRead' })
+  actRows.append(row('Action', 'run on new items only, when the item offers it then: markRead, markUnread, done, or an id the source offers (never open)', el('span', {}, actInput, el('datalist', { id: 'ap-act-choices' }, ...ACT_CHOICES.map((a) => el('option', { value: a })))), errEl('act')))
+  const modeWarn = el('div', { class: 'warn' })
+  const modeWarnRow = el('div', { class: 'field' }, modeWarn)
+  const showMode = () => {
+    modeWarn.textContent = modeWarning(m, state)
+    modeWarnRow.hidden = !modeWarn.textContent
+  }
+  const sessionRows = el('div', {},
     row('Playbook', `what the session does: playbooks/<name>.md in the ${m.level} folder`, select('playbook', playbookOptions(state, m.playbook, m.level), 'playbook', showNew), errEl('playbook')),
     newName,
+    row('Mode', 'Investigate changes nothing; Act may carry out only what the playbook lists under "Allowed actions"', select('mode', [{ value: 'investigate', label: 'Investigate' }, { value: 'act', label: 'Act (Allowed actions only)' }], 'mode', showMode), errEl('mode')),
+    modeWarnRow,
     col('Check', 'optional: what the session checks first against the full item; when it does not hold, it stops', area('check', 3, 'check'), errEl('check')),
     row('Model', note || 'Claude Code\'s alias; Default is your own setting', select('model', choiceOptions(S.MODEL_LIST, m.model), 'model'), errEl('model')),
-    row('Effort', note || 'Default is your own setting', select('effort', choiceOptions(S.EFFORT_LIST, m.effort), 'effort'), errEl('effort'))))
+    row('Effort', note || 'Default is your own setting', select('effort', choiceOptions(S.EFFORT_LIST, m.effort), 'effort'), errEl('effort')))
+  // The onChange row lives in the Limits card below; it is a session's too.
+  let onChangeRow = null
+  const showKind = () => {
+    actRows.hidden = m.kind !== 'act'
+    sessionRows.hidden = m.kind === 'act'
+    if (onChangeRow) onChangeRow.hidden = m.kind === 'act'
+    showOutsiders()
+    showMode()
+  }
+  // The mode warning follows the sources too (outsiders): every check runs the syncs.
+  syncs.push(showMode)
+  page.append(el('h3', { text: 'What it does' }), el('div', { class: 'card' },
+    row('Does', 'start a Claude session with a playbook, or run one of the item\'s own actions with no session (no Claude reads the item)', select('kind', [{ value: 'session', label: 'Start a session' }, { value: 'act', label: 'Run an item action' }], 'act', showKind), null),
+    actRows,
+    sessionRows))
 
   const L = S.LIMITS
   page.append(el('h3', { text: 'Limits' }), el('div', { class: 'card' },
-    row('Per day', `sessions in 24 hours, ${L.perDay.min} to ${L.perDay.max}`, text('perDay', 'limits.perDay', { inputmode: 'numeric', class: 'num' }), errEl('limits.perDay', 'limits')),
-    row('Cooldown', `minutes between two sessions, ${L.cooldownMinutes.min} to ${L.cooldownMinutes.max}`, text('cooldownMinutes', 'limits.cooldownMinutes', { inputmode: 'numeric', class: 'num' }), errEl('limits.cooldownMinutes')),
-    row('Again on change', 'send the item\'s new replies, comments or status into its open tab', toggle('onChange', 'Again on change'), errEl('onChange'))))
+    row('Per day', `sessions (or actions) in 24 hours, ${L.perDay.min} to ${L.perDay.max}`, text('perDay', 'limits.perDay', { inputmode: 'numeric', class: 'num' }), errEl('limits.perDay', 'limits')),
+    row('Cooldown', `minutes between two sessions (or actions), ${L.cooldownMinutes.min} to ${L.cooldownMinutes.max}`, text('cooldownMinutes', 'limits.cooldownMinutes', { inputmode: 'numeric', class: 'num' }), errEl('limits.cooldownMinutes')),
+    (onChangeRow = row('Again on change', 'send the item\'s new replies, comments or status into its open tab', toggle('onChange', 'Again on change'), errEl('onChange')))))
+  showKind()
 
   save.addEventListener('click', () => {
     f.showAll = true
@@ -503,7 +540,7 @@ function ruleFormView() {
     if (save.disabled) return
     f.sending = true
     check()
-    const newPlaybook = m.playbook === NEW_PLAYBOOK
+    const newPlaybook = m.kind !== 'act' && m.playbook === NEW_PLAYBOOK
     request('saveRule', { level: m.level, index: f.index, id: f.origId, hash: f.base, rule: formToRule(m), newPlaybook }, (res) => {
       f.sending = false
       if (res.ok) {
@@ -545,11 +582,83 @@ function openPlaybook(level, name) {
   })
 }
 
+/** A level's base.md in the editor (the host answers its text and hash; absent: empty text, hash null). */
+function openBase(level) {
+  request('openBase', { level }, (res) => {
+    if (!res.ok) {
+      showNotice(res.error)
+      return
+    }
+    ui.base = { level, body: res.body || '', hash: res.hash === undefined ? null : res.hash, sending: false }
+    ui.tab = 'playbooks'
+    render()
+  })
+}
+
+/** The level's base.md row above its playbooks: in use or not, its problem, Edit. */
+function baseCard(level) {
+  const b = baseRows(state).find((x) => x.level === level)
+  if (!b) return null
+  const lbl = el('div', { class: 'lbl' }, el('b', { text: b.label }), el('small', { text: b.text }))
+  if (b.problem) lbl.append(el('div', { class: 'problem', text: b.problem }))
+  return el('div', { class: 'card' }, el('div', { class: 'field' }, lbl, el('div', { class: 'ctl actions' },
+    b.canEdit ? button('Edit', () => openBase(level), `Your standing instructions for every Autopilot session, in the ${level} folder`) : null)))
+}
+
+/** The base.md editor: Markdown, the size cap, Save (an empty text removes the file), Cancel. */
+function baseView() {
+  const p = ui.base
+  const page = el('div', {})
+  page.append(el('h3', { text: `base.md (${p.level})` }))
+  ui.formMsg = el('div', { class: 'notice error', hidden: true })
+  page.append(ui.formMsg)
+  const err = el('div', { class: 'err' })
+  const size = el('small', { class: 'muted' })
+  const save = el('button', { type: 'button', class: 'primary' }, 'Save')
+  const body = el('textarea', { class: 'md', rows: 16, spellcheck: 'false' })
+  body.value = p.body
+  const check = () => {
+    const e = baseErrors(p.body)
+    err.textContent = e.body || ''
+    size.textContent = baseSizeText(p.body)
+    save.disabled = Boolean(e.body) || p.sending
+  }
+  body.addEventListener('input', () => {
+    p.body = body.value
+    check()
+  })
+  page.append(el('div', { class: 'card' },
+    el('div', { class: 'field col' }, el('div', { class: 'lbl' }, el('span', { text: 'Your standing instructions' }), el('small', { text: `every session's prompt carries this after Autopilot's fixed frame and before the item (global first, then project); it cannot change the frame. Empty: the file is removed.` })), body, err, size)))
+  save.addEventListener('click', () => {
+    p.sending = true
+    check()
+    request('saveBase', { level: p.level, body: p.body, hash: p.hash }, (res) => {
+      p.sending = false
+      if (res.ok) {
+        ui.base = null
+        ui.formMsg = null
+        showNotice(res.removed ? `Removed the ${res.level} base.md.` : `Saved the ${res.level} base.md.`, 'info')
+        return
+      }
+      if (res.stale) {
+        p.hash = res.hash === undefined ? null : res.hash
+        showNotice(`${res.error}: the file was changed outside the panel. Your text is kept; Save again writes it over the new version, Cancel drops it.`)
+      } else showNotice(res.error)
+      check()
+    })
+  })
+  page.append(el('div', { class: 'bar form-bar' }, save, button('Cancel', () => { ui.base = null; ui.formMsg = null; render() })))
+  check()
+  return page
+}
+
 /** Both levels' playbooks, each level its own list and New button: a playbook serves its own level's rules. */
 function playbooksTab() {
   const out = el('div', {})
   for (const lv of levelsOf(state)) {
     if (!lv.folder) continue
+    out.append(el('h3', { text: `${lv.label} base.md` }))
+    out.append(baseCard(lv.level))
     out.append(el('h3', { text: `${lv.label} playbooks` }))
     out.append(el('div', { class: 'bar' }, button('New playbook', () => {
       ui.pb = { level: lv.level, name: '', isNew: true, body: playbookTemplate(), hash: null, confirm: false, sending: false }
@@ -735,8 +844,8 @@ function render() {
     return
   }
   const page = el('div', { class: 'set' })
-  if (ui.form || ui.pb) {
-    page.append(ui.form ? ruleFormView() : playbookView())
+  if (ui.form || ui.pb || ui.base) {
+    page.append(ui.form ? ruleFormView() : ui.pb ? playbookView() : baseView())
     r.append(page)
     return
   }
