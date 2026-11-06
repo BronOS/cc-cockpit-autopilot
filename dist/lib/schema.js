@@ -77,11 +77,18 @@
   // costliest model, so the skill tells Claude never to pick it on its own).
   const MODEL_LIST = Object.freeze(['haiku', 'sonnet', 'opus', 'fable'])
   const EFFORT_LIST = Object.freeze(['low', 'medium', 'high', 'xhigh', 'max'])
+  // `default` is a session rule's, `actDefault` an act rule's. An action (marking a mail read) is cheap and
+  // harmless, and a cooldown on it left the second matching mail within the cooldown unread: so an act
+  // rule has no cooldown and the full 100 a day unless it says otherwise. `cooldownMinutes: 0` is no
+  // cooldown in both kinds (lib/state.js checks the cooldown only when it is above 0).
   const LIMITS = Object.freeze({
-    perDay: Object.freeze({ min: 1, max: 100, default: 10 }),
-    cooldownMinutes: Object.freeze({ min: 0, max: 1440, default: 30 }),
+    perDay: Object.freeze({ min: 1, max: 100, default: 10, actDefault: 100 }),
+    cooldownMinutes: Object.freeze({ min: 0, max: 1440, default: 30, actDefault: 0 }),
   })
   const LIMIT_DEFAULTS = Object.freeze({ perDay: LIMITS.perDay.default, cooldownMinutes: LIMITS.cooldownMinutes.default })
+  const ACT_LIMIT_DEFAULTS = Object.freeze({ perDay: LIMITS.perDay.actDefault, cooldownMinutes: LIMITS.cooldownMinutes.actDefault })
+  /** The default limits of a rule kind: an act rule's (`isAct`) or a session rule's. */
+  const limitDefaults = (isAct) => (isAct ? ACT_LIMIT_DEFAULTS : LIMIT_DEFAULTS)
   const JEV_MIN_DEFAULT = 0.7
   // An act rule's action: the inbox-feed v2 action id shape (bronos.inbox design-v2 "The item", the same
   // pattern lib/feed.js checks an item's `actions` with), so a rule can only name an id a source can offer.
@@ -189,8 +196,9 @@
   }
 
   /** The limits; with `add`, each one checked on its own. */
-  function limitsOf(raw, warnings, add) {
-    if (raw === undefined || raw === null) return { ...LIMIT_DEFAULTS }
+  function limitsOf(raw, warnings, add, isAct) {
+    const defaults = limitDefaults(isAct)
+    if (raw === undefined || raw === null) return { ...defaults }
     if (!isObj(raw)) bad('limits must be an object ({ "perDay": 10, "cooldownMinutes": 30 })')
     unknownKeys(raw, LIMIT_KEYS, 'limits', warnings)
     const out = {}
@@ -200,7 +208,7 @@
         const x = own(raw, k)
         const { min, max } = LIMITS[k]
         if (x !== undefined && (!Number.isInteger(x) || x < min || x > max)) bad(`limits.${k} must be a whole number from ${min} to ${max}`)
-        return x === undefined ? LIMITS[k].default : x
+        return x === undefined ? defaults[k] : x
       })
       if (v === undefined) ok = false
       out[k] = v
@@ -367,7 +375,7 @@
       })
     }
     const hours = add(() => hoursOf(own(raw, 'hours'), warnings, add))
-    const limits = add(() => limitsOf(own(raw, 'limits'), warnings, add))
+    const limits = add(() => limitsOf(own(raw, 'limits'), warnings, add, isAct))
     if (errors.length) {
       const v1 = V1_KEYS.find((k) => Object.hasOwn(raw, k))
       if (v1) errors[0] = { ...errors[0], message: `${errors[0].message} (${quote(v1, 10)} is ${V1_NOTE})` }
@@ -481,7 +489,8 @@
       out.onChange = r.onChange === true
     }
     const l = r.limits || {}
-    out.limits = { perDay: l.perDay === undefined ? LIMIT_DEFAULTS.perDay : l.perDay, cooldownMinutes: l.cooldownMinutes === undefined ? LIMIT_DEFAULTS.cooldownMinutes : l.cooldownMinutes }
+    const d = limitDefaults(isAct)
+    out.limits = { perDay: l.perDay === undefined ? d.perDay : l.perDay, cooldownMinutes: l.cooldownMinutes === undefined ? d.cooldownMinutes : l.cooldownMinutes }
     for (const [k, v] of extraKeys(orig && orig.limits, LIMIT_KEYS)) out.limits[k] = v
     for (const [k, v] of extraKeys(orig, RULE_KEYS)) out[k] = v
     return out
@@ -514,6 +523,8 @@
     EFFORT_LIST,
     LIMITS,
     LIMIT_DEFAULTS,
+    ACT_LIMIT_DEFAULTS,
+    limitDefaults,
     JEV_MIN_DEFAULT,
     ACTION_ID,
     ACT_REFUSED,

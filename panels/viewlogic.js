@@ -447,9 +447,26 @@ function formFromRaw(raw, state, level) {
     model: str(r.model),
     effort: str(r.effort),
     onChange: r.onChange === true,
-    perDay: l.perDay === undefined ? String(S.LIMIT_DEFAULTS.perDay) : str(l.perDay),
-    cooldownMinutes: l.cooldownMinutes === undefined ? String(S.LIMIT_DEFAULTS.cooldownMinutes) : str(l.cooldownMinutes),
+    // A limit the rule leaves out shows its kind's default (an act rule: 100 a day, no cooldown).
+    perDay: l.perDay === undefined ? String(S.limitDefaults(isAct).perDay) : str(l.perDay),
+    cooldownMinutes: l.cooldownMinutes === undefined ? String(S.limitDefaults(isAct).cooldownMinutes) : str(l.cooldownMinutes),
   }
+}
+
+/**
+ * The form's limits after the kind changed from `from` to `f.kind`: a limit still at the old kind's
+ * default (or empty) takes the new kind's, a number the person typed stays. Without it a session rule
+ * switched to an action kept a 30-minute cooldown, the very thing an act rule's defaults are there to avoid.
+ */
+function kindLimits(f, from) {
+  const was = S.limitDefaults(from === 'act')
+  const now = S.limitDefaults(f.kind === 'act')
+  const out = {}
+  for (const k of ['perDay', 'cooldownMinutes']) {
+    const t = String(f[k]).trim()
+    out[k] = t === '' || t === String(was[k]) ? String(now[k]) : f[k]
+  }
+  return out
 }
 
 /** A number field: a number when it reads as one (so the loader's range check speaks), else the text (its type check speaks); empty is the default. */
@@ -610,7 +627,7 @@ if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     clockText, switchModel, problemLines, hintLines, levelsOf, levelState, writableLevels, folderRows, logModel, dryModel,
     TABS, tabsModel, folderModel, ruleRows, runningModel, confirmText, OUTSIDERS, OUTSIDERS_ACT, outsidersNote, OUTSIDERS_SHORT,
-    NEW_PLAYBOOK, playbookOptions, choiceOptions, supportNote, sourceChoices, sourceToggle, outsidersCan, formFromRaw, formToRule, formErrors, numOf,
+    NEW_PLAYBOOK, playbookOptions, choiceOptions, supportNote, sourceChoices, sourceToggle, outsidersCan, formFromRaw, kindLimits, formToRule, formErrors, numOf,
     condTable, condDefault, condAdd, condRemove, condSet, condValueText, condParse, condControl, condFieldOptions, condOpOptions, COND_OP_LABELS,
     playbookRows, deleteBlocked, playbookErrors, sizeText, playbookTemplate, createRenderGate,
     ACT_CHOICES, MODE_WARN, MODE_WARN_OUTSIDERS, modeWarning, baseRows, baseErrors, baseSizeText,

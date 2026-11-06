@@ -584,7 +584,7 @@ test('rules add: an act rule needs no playbook; act mode is refused until the pl
   assert.equal(a.code, undefined, a.stderr)
   assert.match(a.stdout, /Rule project:read-done \(project rule 2\) is off: bronos\.gmail, title contains Done · runs markRead on new items \(no session\)/)
   // Stored like any rule: off, the default limits written; no playbook, mode or session key.
-  assert.deepEqual(listOf(t)[1], { id: 'read-done', enabled: false, sources: ['bronos.gmail'], when: [{ field: 'title', op: 'contains', value: 'Done' }], act: 'markRead', limits: { perDay: 10, cooldownMinutes: 30 } })
+  assert.deepEqual(listOf(t)[1], { id: 'read-done', enabled: false, sources: ['bronos.gmail'], when: [{ field: 'title', op: 'contains', value: 'Done' }], act: 'markRead', limits: { perDay: 100, cooldownMinutes: 0 } })
   for (const [bad, re] of [[{ ...act, id: 'o', act: 'open' }, /open/], [{ ...act, id: 'b', playbook: 'check' }, /playbook/], [{ ...act, id: 'e', effort: 'low' }, /effort is for a session rule/], [{ ...act, id: 'm', mode: 'act' }, /mode is for a session rule/]]) {
     const r = await t.ctx.runCli(['rules', 'add', J(bad)])
     assert.equal(r.code, 1, J(bad))

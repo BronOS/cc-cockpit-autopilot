@@ -379,7 +379,7 @@ test('the tabs stay on one row at a 460 px panel: no wrap, a sideways scroll wit
 // ---- 0.3.0: act rules, mode, base.md ----
 
 test('the rule form: an act rule round-trips with no session keys; an empty action shows the loader\'s error', () => {
-  const raw = { id: 'mr', enabled: false, sources: ['bronos.gmail'], when: [{ field: 'title', op: 'contains', value: 'Done' }], act: 'markRead', limits: { perDay: 100, cooldownMinutes: 0 } }
+  const raw = { id: 'mr', enabled: false, sources: ['bronos.gmail'], when: [{ field: 'title', op: 'contains', value: 'Done' }], act: 'markRead', limits: { perDay: 50, cooldownMinutes: 5 } }
   const f = V.formFromRaw(raw, ST, 'project')
   assert.deepEqual([f.kind, f.act, f.mode], ['act', 'markRead', 'investigate'])
   assert.deepEqual(V.formToRule(f), raw)
@@ -440,4 +440,21 @@ test('the sources note is worded per kind; an act rule keeps a playbook ready fo
   const row = (size) => V.baseRows(withLv({ base: { size } }))[0].text
   assert.match(row(10), /\(10 bytes\)$/)
   assert.match(row(3000), /\(3 KiB\)$/)
+})
+
+test('the rule form: the limits show the kind\'s default, and a kind change moves only untouched ones', () => {
+  const act = V.formFromRaw({ id: 'mr', sources: ['bronos.gmail'], act: 'markRead' }, ST, 'project')
+  assert.deepEqual([act.perDay, act.cooldownMinutes], ['100', '0'])
+  const ses = V.formFromRaw({ id: 's', sources: ['bronos.jira'], playbook: 'check' }, ST, 'project')
+  assert.deepEqual([ses.perDay, ses.cooldownMinutes], ['10', '30'])
+  // A new rule starts as a session; switched to an action, both defaults follow; back again, too.
+  const fresh = V.formFromRaw(null, ST, 'project')
+  assert.deepEqual(V.kindLimits({ ...fresh, kind: 'act' }, 'session'), { perDay: '100', cooldownMinutes: '0' })
+  assert.deepEqual(V.kindLimits({ ...act, kind: 'session' }, 'act'), { perDay: '10', cooldownMinutes: '30' })
+  // A number the person typed stays; an empty field takes the new default.
+  assert.deepEqual(V.kindLimits({ ...fresh, kind: 'act', perDay: '20', cooldownMinutes: '' }, 'session'), { perDay: '20', cooldownMinutes: '0' })
+  assert.deepEqual(V.kindLimits({ ...fresh, kind: 'session', perDay: '20' }, 'session'), { perDay: '20', cooldownMinutes: '30' }, 'no change of kind')
+  // An empty number saves as the kind's default.
+  const out = V.formToRule({ ...act, enabled: false, when: [{ field: 'title', op: 'contains', value: 'Done' }], perDay: '', cooldownMinutes: '' })
+  assert.deepEqual(out.limits, S.ACT_LIMIT_DEFAULTS)
 })

@@ -54,8 +54,9 @@ it read needs no Claude, and a session would read an outsider's mail for nothing
   hold and the next rule may take the item (logged as step `action`). An act rule has no `playbook`, `mode`,
   `check`, `model`, `effort` or `onChange` (refused: they belong to a session). `sources`, `when`, `jev`, `hours`,
   `limits`, first rule wins and the one-window claim apply as to any rule. Its limits count only actions that
-  succeeded, and it is not counted in the 10-sessions-an-hour cap. Set `limits` for its volume (a mail rule:
-  `"perDay": 100, "cooldownMinutes": 0`); the defaults (10 a day, 30 min apart) suit sessions. It sends no
+  succeeded, and it is not counted in the 10-sessions-an-hour cap. Its default limits are 100 a day and no
+  cooldown (a cooldown would leave a second matching mail within it unread), so leave `limits` out unless the
+  person wants fewer. It sends no
   notification. A mail act rule is still one **outsiders can trigger**: a stranger's mail made to match is marked
   read unseen; keep `when` narrow (the exact sender address) and tell the person.
 - **Act mode** (`"mode": "act"`): the playbook must have a heading `## Allowed actions` with each action as a list
@@ -181,7 +182,8 @@ ccc autopilot help
   the person names it for that rule, never as your own pick.
 - `onChange`: default false. See onChange below.
 - `limits`: `perDay` 1 to 100 sessions in a rolling 24 hours (default 10) and `cooldownMinutes` 0 to 1440
-  between two sessions of this rule (default 30). A run refused by a limit is logged and not queued. On top of
+  between two sessions of this rule (default 30); 0 is no cooldown. An act rule's defaults are 100 a day and 0
+  (no cooldown); its limits count actions. A run refused by a limit is logged and not queued. On top of
   these Autopilot runs at most `maxRunning` sessions at once per window (project setting, default 3); more wait
   in a queue.
 - An unknown key is ignored with a warning.
@@ -344,7 +346,7 @@ rules are now off and why.
   rule's hours, under a limit, or taken by a rule above. A `claim` skip "running in another window" means
   another project's window opened it first: an item gets one tab app-wide (the dry run does not show this).
 - "Mark the Jira-Done notification emails read": an act rule, no playbook:
-  `ccc autopilot test '{"id":"done-mails-read","sources":["bronos.gmail"],"when":[{"field":"from.address","op":"is","value":"tracker@example.com"},{"field":"title","op":"contains","value":"Done"}],"act":"markRead","limits":{"perDay":100,"cooldownMinutes":0}}'`
+  `ccc autopilot test '{"id":"done-mails-read","sources":["bronos.gmail"],"when":[{"field":"from.address","op":"is","value":"tracker@example.com"},{"field":"title","op":"contains","value":"Done"}],"act":"markRead"}'`
   shows "would run markRead" for the matching mails; then `rules add` it and ask before `rules enable`.
 - "Stop the Jira rule for now": `ccc autopilot rules disable <id>`. To stop everything, `ccc autopilot off`.
 - "Put the urgent mail rule above the catch-all": `ccc autopilot rules move <id> 1`.

@@ -102,8 +102,8 @@ key is ignored with a warning.
 | `model` | `haiku`, `sonnet`, `opus`, `fable` (needs app 0.11) | your default |
 | `effort` | `low`, `medium`, `high`, `xhigh`, `max` (needs app 0.11) | your default |
 | `onChange` | send newer versions of the item into its tab | `false` |
-| `limits.perDay` | 1-100 sessions (or actions) in a rolling 24 hours | 10 |
-| `limits.cooldownMinutes` | 0-1440 minutes between two sessions (or actions) of the rule | 30 |
+| `limits.perDay` | 1-100 sessions (or actions) in a rolling 24 hours | 10 (an act rule: 100) |
+| `limits.cooldownMinutes` | 0-1440 minutes between two sessions (or actions) of the rule; 0 is no cooldown | 30 (an act rule: 0) |
 
 A rule has `playbook` or `act`, never both. `check`, `model`, `effort`, `onChange` and `mode` belong to a
 session, so an act rule may not have them.
@@ -153,11 +153,12 @@ limits. Act rules send no notification and do not count toward the 10 sessions a
 { "id": "done-mails-read", "sources": ["bronos.gmail"],
   "when": [{ "field": "from.address", "op": "is", "value": "tracker@example.com" },
            { "field": "title", "op": "contains", "value": "Done" }],
-  "act": "markRead", "limits": { "perDay": 100, "cooldownMinutes": 0 } }
+  "act": "markRead" }
 ```
 
-The default cooldown (30 minutes) suits sessions; an act rule that should handle every matching mail
-wants `cooldownMinutes: 0` and a higher `perDay`, as above.
+An act rule's default limits are 100 a day and no cooldown, so every matching mail is handled (a cooldown
+would leave the second mail within it unread). A session rule's are 10 a day, 30 minutes apart. Set `limits`
+only to change them.
 
 **Act mode.** A session rule with `"mode": "act"` gets a different permission line in its frame; nothing
 else in the frame changes. Its playbook must have an `## Allowed actions` heading with each action as a

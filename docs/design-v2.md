@@ -375,6 +375,10 @@ file. The rule calls the source's inbox-feed v2 `act(id, action)` through the sa
   claim. Only a success counts against the limits (a source error is not the rule's fault). The log says
   `marked read: <title>` or the source's error. No notification (nothing waits for the person), and act rules are not
   counted toward the 10 sessions an hour, which guards against opening tabs, not against marking mails.
+- **Its own default limits.** Left out, an act rule's limits are `perDay` 100 and `cooldownMinutes` 0; a session
+  rule keeps 10 and 30. Marking a mail read is cheap and harmless, and with the session defaults a second matching
+  mail within the cooldown stayed unread (the owner hit exactly this). `cooldownMinutes: 0` is no cooldown in both
+  kinds. The panel's Limits fields show the kind's default and follow a kind change while they are untouched.
 
 ### `mode` on session rules
 

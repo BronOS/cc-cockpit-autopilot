@@ -7,7 +7,8 @@ const fsp = require('node:fs/promises')
 const path = require('node:path')
 const R = require('../dist/lib/rules')
 const S = require('../dist/lib/schema')
-const { tempFolder, removeFolder, rule } = require('./fakes')
+const { tempFolder, removeFolder, rule, fakeStorage, NOW } = require('./fakes')
+const { createState } = require('../dist/lib/state')
 
 const fullRule = (o = {}) => ({
   id: 'deploy-failed',
@@ -320,7 +321,7 @@ test('an act rule refuses every session key, each under its own field; a session
   assert.deepEqual(e.map((x) => x.field), ['mode', 'check', 'model', 'effort', 'onChange'])
   for (const x of e) assert.match(x.message, /is for a session rule: an act rule runs "markRead" itself and opens no session/)
   // jev, hours, limits and the rest are an act rule's as any rule's.
-  assert.deepEqual(S.checkRule(actRaw({ jev: { question: 'Done?' }, hours: { from: '08:00', to: '18:00' }, limits: { perDay: 100, cooldownMinutes: 0 }, name: 'n', enabled: false })).errors, [])
+  assert.deepEqual(S.checkRule(actRaw({ jev: { question: 'Done?' }, hours: { from: '08:00', to: '18:00' }, limits: { perDay: 50, cooldownMinutes: 5 }, name: 'n', enabled: false })).errors, [])
   for (const m of S.MODE_LIST) assert.equal(S.checkRule(rule('a', { mode: m })).rule.mode, m)
   assert.equal(S.checkRule(rule('a')).rule.mode, 'investigate', 'no mode is investigate')
   for (const bad of ['Act', 'bypass', '', true]) assert.match(S.checkRule(rule('a', { mode: bad })).errors[0].message, /^mode must be one of investigate, act/)
@@ -376,7 +377,34 @@ test('loadFolder: an act rule needs no playbook; act mode without "Allowed actio
 })
 
 test('summaryOf: an act rule names its action, an act-mode rule says so', () => {
-  const a = { ...S.checkRule(actRaw({ limits: { perDay: 100, cooldownMinutes: 0 } })).rule }
+  const a = { ...S.checkRule(actRaw()).rule }
   assert.equal(R.summaryOf(a), 'bronos.gmail, title contains Done · runs markRead on new items (no session) · 100/day')
   assert.equal(R.summaryOf(S.checkRule(rule('a', { mode: 'act', model: 'sonnet' })).rule), 'any source, title contains down · playbook check (act mode sonnet) · 10/day, 30 min cooldown')
+})
+
+test('default limits per kind: an act rule 100 a day and no cooldown, a session rule 10 and 30 min', () => {
+  assert.deepEqual(S.ACT_LIMIT_DEFAULTS, { perDay: 100, cooldownMinutes: 0 })
+  assert.deepEqual(S.LIMIT_DEFAULTS, { perDay: 10, cooldownMinutes: 30 })
+  assert.deepEqual(S.checkRule(actRaw()).rule.limits, S.ACT_LIMIT_DEFAULTS, 'no limits key')
+  assert.deepEqual(S.checkRule(actRaw({ limits: {} })).rule.limits, S.ACT_LIMIT_DEFAULTS, 'an empty limits object')
+  assert.deepEqual(S.checkRule(actRaw({ limits: { cooldownMinutes: 10 } })).rule.limits, { perDay: 100, cooldownMinutes: 10 }, 'each key on its own')
+  assert.deepEqual(S.checkRule(rule('a')).rule.limits, S.LIMIT_DEFAULTS)
+  assert.deepEqual(S.checkRule(rule('a', { limits: { perDay: 3 } })).rule.limits, { perDay: 3, cooldownMinutes: 30 })
+  // canonicalRule writes the kind's defaults too (the panel's save).
+  assert.deepEqual(S.canonicalRule(actRaw(), null).limits, S.ACT_LIMIT_DEFAULTS)
+  assert.deepEqual(S.canonicalRule(rule('a'), null).limits, S.LIMIT_DEFAULTS)
+})
+
+test('the perDay cap allows 100, and cooldownMinutes 0 is no cooldown in both kinds', async () => {
+  assert.ok(S.LIMITS.perDay.max >= 100)
+  assert.equal(S.LIMITS.cooldownMinutes.min, 0)
+  for (const raw of [actRaw({ limits: { perDay: 100 } }), rule('a', { limits: { perDay: 100 } })]) assert.deepEqual(S.checkRule(raw).errors, [])
+  for (const raw of [actRaw({ limits: { perDay: 101 } }), rule('a', { limits: { perDay: 101 } })]) assert.match(S.checkRule(raw).errors[0].message, /limits.perDay must be a whole number from 1 to 100/)
+  // No cooldown: a second run right after the first is not held, for a session rule as for an act rule.
+  for (const r of [S.checkRule(actRaw()).rule, S.checkRule(rule('a', { limits: { cooldownMinutes: 0 } })).rule]) {
+    const st = createState(fakeStorage())
+    await st.load()
+    await st.recordOpen(r.id, NOW, r.act ? 'act' : undefined)
+    assert.equal(st.limitReason(r, NOW + 1), null, r.id)
+  }
 })

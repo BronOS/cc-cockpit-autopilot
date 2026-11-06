@@ -34,8 +34,8 @@ const FIELDS = [
   ['effort', `${S.EFFORT_LIST.join(' | ')}`, "a session rule: the session's effort; left out: your default. Needs cc-cockpit 0.11, older apps ignore it"],
   ['onChange', 'true | false', 'a session rule: default false (a rule fires once per item); true sends a newer version of the item (a reply, a comment, a status change) to the same session'],
   ['limits', 'object', 'per rule'],
-  ['limits.perDay', 'whole number', `${range('perDay')} sessions (an act rule: actions that succeeded) in a rolling 24 hours; default ${S.LIMITS.perDay.default}`],
-  ['limits.cooldownMinutes', 'whole number', `${range('cooldownMinutes')} minutes between two sessions (actions) of this rule; default ${S.LIMITS.cooldownMinutes.default}; an act rule usually wants 0`],
+  ['limits.perDay', 'whole number', `${range('perDay')} sessions (an act rule: actions that succeeded) in a rolling 24 hours; default ${S.LIMITS.perDay.default}, an act rule's ${S.LIMITS.perDay.actDefault}`],
+  ['limits.cooldownMinutes', 'whole number', `${range('cooldownMinutes')} minutes between two sessions (actions) of this rule, 0 is no cooldown; default ${S.LIMITS.cooldownMinutes.default}, an act rule's ${S.LIMITS.cooldownMinutes.actDefault}`],
 ]
 
 /** The condition table, from conditions.js: `field  ops  value`. */
@@ -85,7 +85,6 @@ const EXAMPLE_ACT_RULE = Object.freeze({
     { field: 'title', op: 'contains', value: 'Done' },
   ],
   act: 'markRead',
-  limits: { perDay: 100, cooldownMinutes: 0 },
 })
 
 /** The part an act-mode playbook needs (schema.js hasAllowedActions). Example data only. */

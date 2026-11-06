@@ -513,7 +513,24 @@ function ruleFormView() {
     row('Effort', note || 'Default is your own setting', select('effort', choiceOptions(S.EFFORT_LIST, m.effort), 'effort'), errEl('effort')))
   // The onChange row lives in the Limits card below; it is a session's too.
   let onChangeRow = null
+  // The limits follow the kind while they are at its default (kindLimits); `shownKind` is the kind they were set for.
+  let shownKind = m.kind
+  let perDayInput = null
+  let cooldownInput = null
+  const showLimits = () => {
+    if (!perDayInput) return
+    if (m.kind !== shownKind) {
+      Object.assign(m, kindLimits(m, shownKind))
+      perDayInput.value = m.perDay
+      cooldownInput.value = m.cooldownMinutes
+      shownKind = m.kind
+    }
+    const d = S.limitDefaults(m.kind === 'act')
+    perDayInput.placeholder = String(d.perDay)
+    cooldownInput.placeholder = String(d.cooldownMinutes)
+  }
   const showKind = () => {
+    showLimits()
     actRows.hidden = m.kind !== 'act'
     sessionRows.hidden = m.kind === 'act'
     if (onChangeRow) onChangeRow.hidden = m.kind === 'act'
@@ -529,8 +546,8 @@ function ruleFormView() {
 
   const L = S.LIMITS
   page.append(el('h3', { text: 'Limits' }), el('div', { class: 'card' },
-    row('Per day', `sessions (or actions) in 24 hours, ${L.perDay.min} to ${L.perDay.max}`, text('perDay', 'limits.perDay', { inputmode: 'numeric', class: 'num' }), errEl('limits.perDay', 'limits')),
-    row('Cooldown', `minutes between two sessions (or actions), ${L.cooldownMinutes.min} to ${L.cooldownMinutes.max}`, text('cooldownMinutes', 'limits.cooldownMinutes', { inputmode: 'numeric', class: 'num' }), errEl('limits.cooldownMinutes')),
+    row('Per day', `sessions (or actions) in 24 hours, ${L.perDay.min} to ${L.perDay.max}; empty: ${L.perDay.default} for a session, ${L.perDay.actDefault} for an action`, (perDayInput = text('perDay', 'limits.perDay', { inputmode: 'numeric', class: 'num' })), errEl('limits.perDay', 'limits')),
+    row('Cooldown', `minutes between two sessions (or actions), ${L.cooldownMinutes.min} to ${L.cooldownMinutes.max}; 0 is no cooldown (an action's default; a session's is ${L.cooldownMinutes.default})`, (cooldownInput = text('cooldownMinutes', 'limits.cooldownMinutes', { inputmode: 'numeric', class: 'num' })), errEl('limits.cooldownMinutes')),
     (onChangeRow = row('Again on change', 'send the item\'s new replies, comments or status into its open tab', toggle('onChange', 'Again on change'), errEl('onChange')))))
   showKind()
 
