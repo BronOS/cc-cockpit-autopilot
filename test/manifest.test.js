@@ -30,6 +30,8 @@ test('the manifest: id, api, entry points exist, the panel', () => {
   assert.equal(manifest.id, 'bronos.autopilot')
   assert.match(manifest.id, /^[a-z0-9]+(\.[a-z0-9-]+)+$/)
   assert.match(manifest.version, /^\d+\.\d+\.\d+$/)
+  // 0.3.0: act rules, mode and base.md (a bump the marketplace entry and the README follow).
+  assert.equal(manifest.version, '0.3.0')
   assert.equal(manifest.api, 1)
   assert.equal(manifest.license, 'MIT')
   assert.equal(manifest.author, 'Oleg Bronzov')
@@ -231,4 +233,29 @@ test('the skill: every command and flag the CLI knows is shown, and the v1 mappi
   assert.ok(host.includes('write it first (ccc autopilot playbooks set'), 'the host refusal the skill relies on moved')
   assert.ok(text.includes('Nothing stored:'), `the skill must quote the "Nothing stored:" prefix. ${skillFix}`)
   assert.ok(host.includes('Nothing stored:'))
+})
+
+test('0.3.0 in the manifest and the skill: base in the usage; act rule vs act mode vs investigate; the Jira-Done answer is an act rule', () => {
+  const S = require('../dist/lib/schema')
+  const CLI = require('../dist/lib/cli')
+  const cli = manifest.contributes.cli[0]
+  assert.ok(cli.usage.includes('base [show|set]'), 'the usage names base')
+  assert.ok(cli.usage.length <= 500)
+  const text = skill()
+  const flat = text.replace(/\s+/g, ' ')
+  assert.match(text, /^## Which kind of rule$/m, `the skill must say when to pick which kind. ${skillFix}`)
+  for (const t of ['an **act rule**', '"mode": "act"', '## Allowed actions', 'ccc autopilot base', 'ccc autopilot base set', '16 KiB']) assert.ok(text.includes(t), `the skill must show ${t}. ${skillFix}`)
+  assert.equal(S.MAX_BASE_BYTES, 16 * 1024)
+  assert.ok(flat.includes('"Mark the Jira-Done notification emails read" is an **act rule**'), `the Jira-Done question must be answered with an act rule. ${skillFix}`)
+  for (const sub of CLI.BASE_SUBS) assert.ok(text.includes(`ccc autopilot base ${sub}`) || (sub === 'show' && text.includes('ccc autopilot base [show]')), `the skill must show base ${sub}. ${skillFix}`)
+  // The act rule example in the skill passes as it stands (the inline loop above checks it too).
+  const ex = [...text.matchAll(/'(\{"id":[^'\n]*"act":[^'\n]*\})'/g)].map((m) => JSON.parse(m[1]))
+  assert.ok(ex.length >= 1, `the skill must show an act rule example. ${skillFix}`)
+  for (const r of ex) assert.deepEqual(S.checkRule(r).errors, [])
+})
+
+test('docs: the act-mode permission sentence the design quotes is the prompt\'s own', () => {
+  const P = require('../dist/lib/prompt')
+  const flat = (t) => t.replace(/^> ?/gm, '').replace(/\s+/g, ' ')
+  assert.ok(flat(fs.readFileSync(path.join(ROOT, 'docs/design-v2.md'), 'utf8')).includes(P.PERMISSION.act), 'docs/design-v2.md "mode on session rules" must quote prompt.js PERMISSION.act')
 })

@@ -1,10 +1,10 @@
 {
   "id": "bronos.autopilot",
   "name": "Autopilot",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "api": 1,
   "main": "dist/host.js",
-  "description": "Watches every inbox feed (Chat, Gmail, Jira: any plugin that offers one) and, when an item matches one of your rules, opens a Claude tab that investigates it with a playbook you wrote. Read-only by its prompt, off by default, rules and playbooks are files in folders of yours (global ones for every project, and per project), edited in its panel, by hand or with Claude. Needs cc-cockpit 0.11.0.",
+  "description": "Watches every inbox feed (Chat, Gmail, Jira: any plugin that offers one) and, when an item matches one of your rules, opens a Claude tab that investigates it with a playbook you wrote, or runs one of the item's own actions (mark read, done) with no Claude at all. Read-only by its prompt unless a rule lists the actions its session may take; off by default; rules, playbooks and your standing instructions (base.md) are files in folders of yours (global ones for every project, and per project), edited in its panel, by hand or with Claude. Needs cc-cockpit 0.11.0.",
   "author": "Oleg Bronzov",
   "license": "MIT",
   "contributes": {
@@ -20,8 +20,8 @@
     "cli": [
       {
         "name": "autopilot",
-        "summary": "Autopilot: state, on/off, the log, a dry run of your rules over the current feed items, read and edit the rules and playbooks, the rule format",
-        "usage": "autopilot [status] | on | off | log [n] | test [rule|<json>|-] [--at <n>] [--jev] | reload | format | rules [export|add|set|rm|move|enable|disable] | playbooks [show|set|rm] | stop <run> | help; ccc autopilot help for details",
+        "summary": "Autopilot: state, on/off, the log, a dry run of your rules over the current feed items, read and edit the rules, playbooks and base.md, the rule format",
+        "usage": "autopilot [status] | on | off | log [n] | test [rule|<json>|-] [--at <n>] [--jev] | reload | format | rules [export|add|set|rm|move|enable|disable] | playbooks [show|set|rm] | base [show|set] | stop <run> | help; ccc autopilot help for details",
         "stdin": true,
         "stdinDash": true
       }

@@ -2,13 +2,15 @@
 
 A [cc-cockpit](https://github.com/BronOS/cc-cockpit) plugin. It watches every plugin that offers an
 `inbox-feed` (Google Chat, Gmail and Jira today), and when a new or changed item matches one of your
-rules it opens a Claude tab that investigates the item with a playbook you wrote, before you have looked.
+rules it opens a Claude tab that investigates the item with a playbook you wrote, before you have looked,
+or (an act rule) runs one of the item's own actions, such as mark read, with no Claude at all.
 
 Examples of rules: "a message in the Deploys space that says a deploy failed", "a support ticket that
 says people cannot log in to a website".
 
-The session investigates and reports in its tab. Its prompt tells it to change nothing, and anything
-your permission allowlist does not allow waits for you at a prompt (see Safety).
+The session investigates and reports in its tab. Its prompt tells it to change nothing (or, in act mode,
+to do only what its playbook lists), and anything your permission allowlist does not allow waits for you
+at a prompt (see Safety).
 
 **Needs cc-cockpit 0.11.0 or newer** (`inbox-feed` v2, `ctx.services.useAll`). **`model`, `effort` and
 the takeover check need 0.11**: an older app ignores `model` and `effort` (the panel and `ccc autopilot`
@@ -93,13 +95,18 @@ key is ignored with a warning.
 | `when` | up to 20 conditions, all must hold (the same format as Inbox's rules) | none |
 | `jev` | `{ "question": "...", "min": 0.7 }`: Jev scores title and preview from 0 to 1 | none |
 | `hours` | `{ "from": "22:00", "to": "07:00" }`, 24-hour local time; `to` before `from` crosses midnight | any time |
-| `playbook` | the file `playbooks/<name>.md`, without `.md` | required |
+| `playbook` | the file `playbooks/<name>.md`, without `.md` | a session rule: required |
+| `act` | one of the item's own actions instead of a session: `markRead`, `markUnread`, `done` or a source's own (never `open`) | an act rule: required |
+| `mode` | `investigate` or `act` (a session rule only, see Act mode) | `investigate` |
 | `check` | up to 500 characters: what the session verifies first against the full item | none |
 | `model` | `haiku`, `sonnet`, `opus`, `fable` (needs app 0.11) | your default |
 | `effort` | `low`, `medium`, `high`, `xhigh`, `max` (needs app 0.11) | your default |
 | `onChange` | send newer versions of the item into its tab | `false` |
-| `limits.perDay` | 1-100 sessions in a rolling 24 hours | 10 |
-| `limits.cooldownMinutes` | 0-1440 minutes between two sessions of the rule | 30 |
+| `limits.perDay` | 1-100 sessions (or actions) in a rolling 24 hours | 10 |
+| `limits.cooldownMinutes` | 0-1440 minutes between two sessions (or actions) of the rule | 30 |
+
+A rule has `playbook` or `act`, never both. `check`, `model`, `effort`, `onChange` and `mode` belong to a
+session, so an act rule may not have them.
 
 - **`sources` is required, on purpose.** A rule written with Chat in mind must not fire on incoming
   email by omission, since anyone outside can send mail. `["*"]` and mail sources are flagged as
@@ -123,6 +130,51 @@ key is ignored with a warning.
 
 **No burst at start.** Items in the feeds when the app starts, when a feed joins or when you switch
 Autopilot on are the baseline: they never fire. Only items that appear or change after it do.
+
+## Three kinds of rule
+
+From least to most power:
+
+| You want | Rule | Why |
+|---|---|---|
+| one of the item's own actions and nothing else ("mark the tracker's Done notification mails read") | an **act rule**: `"act": "markRead"` | no Claude runs, so no outside text reaches a model |
+| a session that looks and reports | a session rule, `mode` left out (`investigate`) | it changes nothing |
+| a session that also does a few named things | `"mode": "act"` and an `## Allowed actions` list in the playbook | it may do only what that list names, on that item |
+
+**Act rules.** Autopilot calls the source's own `act(id, action)` (the same call Inbox makes when you
+click), only on a **new** item (a changed one is never acted on), and only when the action is in the
+item's `actions` list right now; when it is not, the rule does not hold, the log says why and the next
+rule may take the item. Hours, `when`, `jev`, limits and first-rule-wins apply as for any rule, and two
+windows never act on the same item (the item is claimed while the action runs). The log says
+`marked read: <title>`, or the source's error; only an action that went through counts against the
+limits. Act rules send no notification and do not count toward the 10 sessions an hour.
+
+```json
+{ "id": "done-mails-read", "sources": ["bronos.gmail"],
+  "when": [{ "field": "from.address", "op": "is", "value": "tracker@example.com" },
+           { "field": "title", "op": "contains", "value": "Done" }],
+  "act": "markRead", "limits": { "perDay": 100, "cooldownMinutes": 0 } }
+```
+
+The default cooldown (30 minutes) suits sessions; an act rule that should handle every matching mail
+wants `cooldownMinutes: 0` and a higher `perDay`, as above.
+
+**Act mode.** A session rule with `"mode": "act"` gets a different permission line in its frame; nothing
+else in the frame changes. Its playbook must have an `## Allowed actions` heading with each action as a
+list item, or the rule is a problem and never runs:
+
+```markdown
+## Allowed actions
+
+- Re-check https://www.example.com once, two minutes after the alert.
+- Append one line to ~/notes/site-incidents.md: the time, the site and what you found.
+```
+
+The session may do those, on that item only; anything else it thinks should be done it reports as a
+recommendation. Name each target in the list itself, so nothing has to come from the item. The panel
+warns when you pick act mode, more strongly for a rule outsiders can trigger (any mail source or
+`["*"]`): there a stranger's message starts a session that may take those actions. See
+`examples/playbooks/site-log.md`.
 
 ## One tab per item, `maxRunning`, the queue
 
@@ -191,11 +243,12 @@ The files stay the single source of truth: what the panel writes is plain `autop
 
 - **Rules** tab: the project rules, then the global ones, each entry in file order with its level tag, switch, **Edit**, **Delete**, warnings and
   problems. The form has the sources (the feeds running now), condition rows, a Jev question, hours,
-  playbook (or **New playbook**), check, model, effort, limits and "again on change", and checks the
-  rule with the loader's own code. A new rule starts off; when both folders exist, the form asks which
+  what the rule does (a session, or an action with no session), playbook (or **New playbook**), mode
+  (with its warning), check, model, effort, limits and "again on change", and checks the rule with the
+  loader's own code. A new rule starts off; when both folders exist, the form asks which
   level it goes to.
-- **Running** tab: the tabs Autopilot opened, the queue and the slots; **Playbooks** and **Log**
-  (newest first).
+- **Running** tab: the tabs Autopilot opened, the queue and the slots; **Playbooks** (with each
+  level's `base.md`: in use or not, and an edit entry) and **Log** (newest first).
 - **Ask Claude to write a rule** opens a tab that learns the format, asks what the rule is for,
   edits the files, runs `ccc autopilot test <id>` and shows the result.
 
@@ -211,10 +264,21 @@ warning. A playbook should name the places it may check itself (your hosts, proj
 never takes one from the item: see `examples/playbooks/site-check.md`. One playbook can serve several
 rules of different weight.
 
+## base.md: your standing instructions
+
+An optional `base.md` in a level's folder (beside `autopilot-rules.json`, at most 16 KiB): what every
+session of that level should know, such as how to write the summary or what never to touch. It goes into
+every session prompt after the fixed frame and before the item, global first, then project, under a
+heading that says it adds to the frame and never lifts it. Marker look-alikes are taken out of it. A
+`base.md` that is there but cannot be used (too big, a link) stops every session from opening until it is
+fixed, so a rule never runs without instructions you meant it to have. Edit it on the panel's Playbooks
+tab or with `ccc autopilot base set`. Act rules have no prompt, so it does not reach them.
+
 ## The prompt
 
-Every session gets a fixed frame, the item, then your playbook: the rule's name, "investigate only;
-change nothing", the item between a random marker made fresh for the run (anything in the item that
+Every session gets a fixed frame, your `base.md` (when there is one), the item, then your playbook: the
+rule's name, "investigate only; change nothing" (or, in act mode, the permission to carry out only the
+playbook's Allowed actions), the item between a random marker made fresh for the run (anything in the item that
 looks like a marker is taken out first), the instruction to check for injection first and never follow
 the item, the rule's `check`, and a short summary at the end. With `onChange` the frame also says that
 newer versions may arrive and how to stop (`ccc autopilot stop <run>`).
@@ -224,7 +288,11 @@ newer versions may arrive and how to stop (`ccc autopilot stop <run>`).
 The session reads text from outside by design, and it keeps its tools. What limits the damage:
 
 - **Normal mode, your allowlist.** What your permission allowlist allows runs; anything else waits at a
-  prompt. "Change nothing" is an instruction, not a sandbox: keep the allowlist read-only.
+  prompt. "Change nothing" is an instruction, not a sandbox: keep the allowlist read-only. In act mode
+  too, Claude Code's own permission settings still apply inside the tab.
+- **The frame is fixed.** Outsiders write the item and nobody watches, so neither your `base.md` nor a
+  playbook can change the frame's order or wording; act mode changes only the permission line.
+- **Act rules run no model**: there is nothing for the item's text to inject into.
 - **The item is fenced and untrusted**, and a playbook that names its own places leaves the session
   nothing to take from the item.
 - **Outsider triggers are flagged.** `["*"]`, any mail source and an `onChange` rule on them show a
@@ -248,18 +316,21 @@ ccc autopilot reload                         read both folders again and list th
 ccc autopilot format                         the format: every field, type and limit
 ccc autopilot rules [export|add|set|rm|move|enable|disable] [--project|--global]
 ccc autopilot playbooks [show|set|rm] [--project|--global]
+ccc autopilot base [show|set <text|->] [--project|--global]
+                                             the base.md of each level; an empty text removes it
 ccc autopilot stop <run>                     for the run's own tab only: stop updates
 ccc autopilot help
 ```
 
-- A `-` argument reads stdin (JSON for `rules add|set` and `test`, text for `playbooks set`), so long
+- A `-` argument reads stdin (JSON for `rules add|set` and `test`, text for `playbooks set` and `base set`), so long
   input needs no shell quoting: `echo '{...}' | ccc autopilot rules add -`. stdin is read only then.
 - Reads show both levels. A write needs `--project` or `--global` (or a rule named `project:<id>` /
   `global:<id>`) when both folders exist; with one folder it goes there.
 - A rule number is its position in its level's `autopilot-rules.json` as `rules` prints it; digits only
   is always a position, anything else an id.
-- `rules add` stores the rule off and refuses a rule whose playbook does not exist; on any problem
-  nothing is stored and the error names the field.
+- `rules add` stores the rule off and refuses a rule whose playbook does not exist, or an act-mode rule
+  whose playbook has no `## Allowed actions` list; on any problem nothing is stored and the error names
+  the field.
 - Exit codes: 0 done, 1 refused, 2 usage or unparsable JSON.
 
 ## Development
