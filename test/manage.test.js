@@ -547,3 +547,14 @@ test('a rules file that appears between the load and the first save is a conflic
     fs.rmSync(base, { recursive: true, force: true })
   }
 })
+
+test('Ask Claude opens a selected tab: the person clicked, so the tab they asked for comes to the front', async () => {
+  const t = await setup()
+  const r = await t.send('askClaude')
+  assert.equal(r.ok, true, r.error)
+  assert.equal(t.ctx.opened.length, 1)
+  // Only the tabs a rule opens on its own stay in the background (design-v2 "One tab per item").
+  assert.equal(t.ctx.opened[0].focus, true)
+  t.done()
+  removeFolder(t.dir)
+})

@@ -1,7 +1,7 @@
 {
   "id": "bronos.autopilot",
   "name": "Autopilot",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "api": 1,
   "main": "dist/host.js",
   "description": "Watches every inbox feed (Chat, Gmail, Jira: any plugin that offers one) and, when an item matches one of your rules, opens a Claude tab that investigates it with a playbook you wrote. Read-only by its prompt, off by default, rules and playbooks are files in folders of yours (global ones for every project, and per project), edited in its panel, by hand or with Claude. Needs cc-cockpit 0.11.0.",

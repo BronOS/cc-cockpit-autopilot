@@ -1135,7 +1135,7 @@ function createAutopilot(ctx, opts = {}) {
     },
     async askClaude() {
       const folders = Object.fromEntries(S.LEVELS.map((l) => [l, folderOf(l)]))
-      const r = await ctx.sessions.open({ cwd: ctx.projectDir, prompt: F.askPrompt(folders) })
+      const r = await ctx.sessions.open({ cwd: ctx.projectDir, prompt: F.askPrompt(folders), focus: true })
       return { tabId: r && typeof r.tabId === 'string' ? r.tabId : null }
     },
   }
