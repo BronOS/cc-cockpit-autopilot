@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Autopilot</title>
+    <!-- The panel CSP allows script from this plugin's own files only (no inline script), so the
+      logic lives in main.js; viewlogic.js holds its pure parts. The SDK gives the page `ccPanel` and
+      the app theme variables. The title bar (on/off, rule count, refresh) is the app's, from the
+      host's ctx.panels.header. The look is bronos.inbox's settings view: cards of aligned rows, the
+      label left and the control right, its toggle switch, text buttons. ../dist/lib/schema.js is the
+      rule format the host's loader uses, so the form checks a rule exactly as the loader will. -->
+    <script src="/__sdk/panel.js"></script>
+    <script src="../dist/lib/conditions.js" defer></script>
+    <script src="../dist/lib/schema.js" defer></script>
+    <script src="viewlogic.js" defer></script>
+    <script src="main.js" defer></script>
+    <style>
+      body { margin: 0; font: 12.5px/1.4 system-ui, sans-serif; background: var(--cc-bg); color: var(--cc-fg); }
+      button { font: inherit; color: inherit; background: var(--cc-bg-menu); border: 1px solid var(--cc-border); border-radius: 4px; padding: 1px 7px; cursor: pointer; height: 24px; }
+      button:hover { border-color: var(--cc-border-strong); }
+      button:disabled { opacity: .5; cursor: default; }
+      button:focus-visible { outline: 2px solid var(--cc-focus); outline-offset: -2px; }
+      .muted { color: var(--cc-fg-muted); }
+      .set { padding: 6px 12px 12px; }
+      .set h3 { margin: 16px 0 6px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--cc-fg-muted); }
+      .set .card { border: 1px solid var(--cc-border); border-radius: 6px; background: var(--cc-surface-1); }
+      /* Wrap: in a narrow side panel a 220 px input would squeeze its label to a letter per line, so the control drops under the label instead. */
+      .set .field { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; min-height: 34px; padding: 5px 10px; }
+      .set .field + .field { border-top: 1px solid var(--cc-border); }
+      .set .field .lbl { flex: 1 1 150px; min-width: 0; overflow-wrap: anywhere; }
+      .set .field .lbl small { display: block; color: var(--cc-fg-subtle); font-size: 11px; line-height: 1.35; margin-top: 1px; }
+      .set .field .lbl b { font-weight: 600; }
+      .set .field .ctl { flex: none; display: flex; justify-content: flex-end; max-width: 100%; }
+      .set .field .ctl.path { max-width: 55%; color: var(--cc-fg-muted); font: 11.5px ui-monospace, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; }
+      .set .field .ctl.state { color: var(--cc-fg-subtle); font-size: 11px; width: 24px; }
+      .set .field.off .lbl { opacity: .6; }
+      .set .field.head { min-height: 26px; }
+      .set .warn { color: var(--cc-status-needs-permission, #e5a00d); font-size: 11px; margin-top: 3px; }
+      /* Toggle switch: a checkbox drawn as a track and a knob (bronos.inbox settings.js). */
+      .set input.toggle { appearance: none; -webkit-appearance: none; margin: 0; width: 30px; height: 17px; border-radius: 9px; background: var(--cc-surface-3); position: relative; cursor: pointer; transition: background .15s; flex: none; }
+      .set input.toggle::after { content: ""; position: absolute; top: 2px; left: 2px; width: 13px; height: 13px; border-radius: 50%; background: var(--cc-fg-muted); transition: transform .15s, background .15s; }
+      .set input.toggle:checked { background: var(--cc-accent); }
+      .set input.toggle:checked::after { transform: translateX(13px); background: var(--cc-accent-fg, #fff); }
+      .set input.toggle:focus-visible { outline: 2px solid var(--cc-focus); outline-offset: 2px; }
+      .set input.toggle:disabled { opacity: .5; cursor: default; }
+      .bar { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }
+      .title { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .mark { font-size: 11px; font-weight: 600; white-space: nowrap; }
+      .mark.yes { color: var(--cc-status-waiting, #3ecf8e); }
+      .mark.maybe { color: var(--cc-status-needs-permission, #e5a00d); }
+      .mark.no { color: var(--cc-fg-subtle); }
+      /* A rule's level: project rules run in this project only and are checked first; global ones run everywhere. */
+      .tag { display: inline-block; margin-left: 6px; padding: 0 5px; border-radius: 3px; font-size: 10.5px; line-height: 16px; vertical-align: 1px; background: var(--cc-surface-3); color: var(--cc-fg-muted); }
+      .tag.project { color: var(--cc-accent); }
+      .log .when { flex: none; width: 72px; color: var(--cc-fg-muted); font-variant-numeric: tabular-nums; font-size: 11.5px; align-self: flex-start; padding-top: 1px; }
+      .log .fired .outcome { color: var(--cc-status-waiting, #3ecf8e); }
+      .log .skipped .outcome { color: var(--cc-status-needs-permission, #e5a00d); }
+      .log .switch .title { color: var(--cc-fg-muted); white-space: normal; }
+      .notice { margin: 8px 0; padding: 6px 8px; border-radius: 5px; background: var(--cc-bg-banner); border: 1px solid var(--cc-border); white-space: pre-wrap; overflow-wrap: anywhere; }
+      .notice.error { background: var(--cc-bg-error); }
+      .src-err { margin: 6px 0; padding: 5px 8px; border-radius: 5px; background: color-mix(in srgb, var(--cc-status-needs-permission, #e5a00d) 12%, transparent); color: var(--cc-fg); font-size: 12px; overflow-wrap: anywhere; }
+      .empty { padding: 26px 10px; text-align: center; color: var(--cc-fg-subtle); }
+      .notice.info { background: var(--cc-bg-banner); }
+      .problem, .err { color: #e5534b; font-size: 11px; margin-top: 3px; }
+      .err:empty { display: none; }
+      [hidden] { display: none !important; }
+      button.primary { background: var(--cc-accent); color: var(--cc-accent-fg, #fff); border-color: var(--cc-accent); }
+      button.danger { color: #e5534b; }
+      /* Tabs: Rules, Playbooks, Log. */
+      .tabs { display: flex; flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; gap: 0; white-space: nowrap; margin: 16px 0 8px; border-bottom: 1px solid var(--cc-border); }
+      .tabs::-webkit-scrollbar { display: none; }
+      /* One row at a 460 px panel: tight padding and a smaller label; a narrower panel scrolls sideways, no scrollbar. */
+      .tabs button { flex: none; font-size: 12px; border: none; border-bottom: 2px solid transparent; border-radius: 0; background: none; height: 28px; padding: 0 7px; color: var(--cc-fg-muted); }
+      .tabs button[aria-selected="true"] { color: var(--cc-fg); border-bottom-color: var(--cc-accent); }
+      /* The rule form and the playbook editor. */
+      input[type=text], input[type=time], select, textarea { font: inherit; color: inherit; background: var(--cc-bg); border: 1px solid var(--cc-border); border-radius: 4px; padding: 3px 6px; box-sizing: border-box; }
+      input[type=text]:focus-visible, input[type=time]:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px solid var(--cc-focus); outline-offset: -1px; }
+      input[type=text]:disabled { opacity: .6; }
+      .set .field .ctl input[type=text] { width: 220px; }
+      .set .field .ctl input.num { width: 70px; }
+      /* A select sizes to its longest option (a level option carries the folder path) and would squeeze the label to one letter per line. */
+      .set .field .ctl select { max-width: 200px; min-width: 0; text-overflow: ellipsis; }
+      .set .field .ctl input[type=time].num { width: 110px; }
+      .set .field.col { flex-direction: column; flex-wrap: nowrap; align-items: stretch; gap: 4px; }
+      .set .field.col .lbl { flex: none; }
+      textarea { width: 100%; resize: vertical; }
+      textarea.md { font: 12px/1.45 ui-monospace, monospace; min-height: 300px; tab-size: 4; }
+      .chips { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+      .chip { display: inline-flex; align-items: center; gap: 2px; padding: 0 0 0 8px; border-radius: 10px; background: var(--cc-surface-3); font-size: 11.5px; max-width: 100%; overflow-wrap: anywhere; }
+      .chip button { height: 18px; padding: 0 6px; border: none; background: none; }
+      .chips input[type=text] { flex: 1; min-width: 140px; }
+      /* The sources picker and the condition rows (copied from bronos.inbox's settings page). */
+      .srcs { display: flex; flex-direction: column; gap: 3px; }
+      label.src { display: inline-flex; gap: 6px; align-items: center; }
+      .srcs label.src > span { white-space: nowrap; }
+      /* The outsiders warning row, while it has nothing to say, is not an empty card row. */
+      .set .field:has(> .warn[hidden]:only-child) { display: none; }
+      label.src small { color: var(--cc-fg-subtle); font-size: 11px; }
+      label.src.gone { color: var(--cc-fg-muted); font-style: italic; }
+      .conds { display: flex; flex-direction: column; gap: 6px; margin-bottom: 6px; }
+      .cond { display: flex; gap: 6px; align-items: flex-start; flex-wrap: wrap; }
+      .cond input[type=text] { flex: 1; min-width: 140px; }
+      .cond textarea { flex: 1; min-width: 160px; width: auto; }
+      .cond .checks { display: inline-flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+      .cond .checks label { display: inline-flex; gap: 4px; align-items: center; }
+      button.ghost { border-color: transparent; background: none; }
+      .actions { gap: 6px; align-items: center; }
+      .confirm { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 4px; }
+      .form-bar { margin-top: 12px; }
+    </style>
+  </head>
+  <body>
+    <div id="root"><div class="empty">Loading…</div></div>
+  </body>
+</html>

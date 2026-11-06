@@ -1,0 +1,6 @@
+{
+  "name": "cc-cockpit-autopilot",
+  "private": true,
+  "description": "Tests for the bronos.autopilot cc-cockpit plugin; the plugin itself needs no install or build.",
+  "scripts": { "test": "node --test test/" }
+}

@@ -1,0 +1,32 @@
+[
+  {
+    "id": "site-down",
+    "name": "Site down",
+    "enabled": false,
+    "sources": ["bronos.chat"],
+    "when": [
+      { "field": "place.name", "op": "is", "value": "Alerts" },
+      { "field": "mentionsMe", "op": "is", "value": true },
+      { "field": "title", "op": "contains", "value": "down" }
+    ],
+    "playbook": "site-check",
+    "check": "The message reports that a website (a hostname such as shop.example.com) is down or returns errors right now. Made-up names: change them to yours.",
+    "model": "sonnet",
+    "limits": { "perDay": 10, "cooldownMinutes": 30 }
+  },
+  {
+    "id": "login-broken",
+    "name": "Login broken",
+    "enabled": false,
+    "sources": ["bronos.jira"],
+    "when": [
+      { "field": "place.name", "op": "is", "value": "Support" },
+      { "field": "title", "op": "contains", "value": "login" }
+    ],
+    "jev": { "question": "Does this ticket report that people cannot log in to a website?", "min": 0.7 },
+    "playbook": "site-check",
+    "check": "The ticket (for example SUP-123) reports that people cannot log in to a website, and names the site.",
+    "limits": { "perDay": 5, "cooldownMinutes": 60 },
+    "onChange": false
+  }
+]

@@ -1,0 +1,82 @@
+{
+  "id": "bronos.autopilot",
+  "name": "Autopilot",
+  "version": "0.2.0",
+  "api": 1,
+  "main": "dist/host.js",
+  "description": "Watches every inbox feed (Chat, Gmail, Jira: any plugin that offers one) and, when an item matches one of your rules, opens a Claude tab that investigates it with a playbook you wrote. Read-only by its prompt, off by default, rules and playbooks are files in folders of yours (global ones for every project, and per project), edited in its panel, by hand or with Claude. Needs cc-cockpit 0.11.0.",
+  "author": "Oleg Bronzov",
+  "license": "MIT",
+  "contributes": {
+    "panels": [
+      {
+        "id": "main",
+        "title": "Autopilot",
+        "icon": "icons/autopilot.svg",
+        "entry": "panels/main.html",
+        "defaultZone": "right"
+      }
+    ],
+    "cli": [
+      {
+        "name": "autopilot",
+        "summary": "Autopilot: state, on/off, the log, a dry run of your rules over the current feed items, read and edit the rules and playbooks, the rule format",
+        "usage": "autopilot [status] | on | off | log [n] | test [rule|<json>|-] [--at <n>] [--jev] | reload | format | rules [export|add|set|rm|move|enable|disable] | playbooks [show|set|rm] | stop <run> | help; ccc autopilot help for details",
+        "stdin": true,
+        "stdinDash": true
+      }
+    ],
+    "skills": [
+      { "id": "autopilot-rules", "dir": "skills/autopilot-rules" }
+    ],
+    "settings": {
+      "app": {
+        "type": "object",
+        "properties": {
+          "globalFolder": {
+            "type": "string",
+            "title": "Global rules folder",
+            "description": "The folder with autopilot-rules.json and playbooks/<name>.md whose rules run in every project. ~ is your home folder; the path must be absolute or start with ~. Empty: no global rules.",
+            "default": "~/.config/cc-cockpit-autopilot",
+            "maxLength": 1000
+          }
+        }
+      },
+      "project": {
+        "type": "object",
+        "properties": {
+          "projectFolder": {
+            "type": "string",
+            "title": "Project rules folder",
+            "description": "A folder with autopilot-rules.json and playbooks/<name>.md whose rules run in this project only, checked before the global rules. ~ is your home folder; a relative path is read from the project folder. Empty: no project rules.",
+            "default": "",
+            "maxLength": 1000
+          },
+          "maxRunning": {
+            "type": "integer",
+            "title": "Sessions running at once",
+            "description": "At most this many Autopilot tabs starting or working in this window; more items wait in a queue. A finished tab (waiting for you to read it), one waiting for a permission answer and an ended one do not count.",
+            "minimum": 1,
+            "maximum": 10,
+            "default": 3
+          },
+          "myNames": {
+            "type": "array",
+            "title": "Your names and addresses",
+            "description": "Your own name or address in the sources (e.g. Ann Example, ann@example.com). A change whose latest activity is yours (your reply) is not delivered into the item's tab. Empty: no such check.",
+            "maxItems": 10,
+            "items": { "type": "string", "title": "Name or address", "maxLength": 200 },
+            "default": []
+          }
+        }
+      }
+    }
+  },
+  "services": {
+    "uses": {
+      "inbox-feed": 2,
+      "jev": 1
+    },
+    "collects": ["inbox-feed"]
+  }
+}
