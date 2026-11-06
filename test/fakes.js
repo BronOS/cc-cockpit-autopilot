@@ -138,6 +138,32 @@ function fakeJev(answer = 0.9) {
   return jev
 }
 
+/**
+ * A fake `jira` provider (bronos.jira's service, v1). `issue(key, { maxAgeMs })` answers `jira.issues[key]`
+ * (the facts as the real service sends them: status, category, done, mine, assignee, priority, type), an
+ * Error thrown from `jira.errors[key]` (or `jira.error` for every key), and `jira.calls` records each call as
+ * `{ key, opts }`. An unknown key rejects with the service's own "not found (404)" wording.
+ */
+function fakeJira(issues = {}) {
+  const jira = {
+    issues,
+    errors: {},
+    error: null,
+    calls: [],
+    impl: {
+      async issue(key, opts) {
+        jira.calls.push({ key, opts })
+        const err = jira.errors[key] || jira.error
+        if (err) throw err
+        const i = jira.issues[key]
+        if (!i) throw new Error(`jira: issue ${key}: not found (404)`)
+        return { key, summary: 'Example summary', status: 'In Progress', category: 'indeterminate', done: false, mine: false, assignee: 'Ann Example', priority: 'Medium', type: 'Task', url: `https://example.atlassian.net/browse/${key}`, at: NOW, source: 'fetch', ...i }
+      },
+    },
+  }
+  return jira
+}
+
 /** A handle like the app's: every property but `on` is an async method, data copied both ways. */
 function handleOf(getImpl, label, service) {
   return new Proxy(
@@ -198,10 +224,11 @@ function fakeServices(ctx, opts) {
       })
     },
     use(name) {
+      if (name === 'jira') return handleOf(() => ctx.jira && ctx.jira.impl, 'bronos.jira', 'jira')
       if (name !== 'jev') throw new Error(`plugin bronos.autopilot does not declare service "${name}" in services.uses`)
       return handleOf(() => ctx.jev && ctx.jev.impl, 'bronos.jev', 'jev')
     },
-    available: (name) => (name === 'jev' ? Boolean(ctx.jev) : name === 'inbox-feed' && providers.size > 0),
+    available: (name) => (name === 'jev' ? Boolean(ctx.jev) : name === 'jira' ? Boolean(ctx.jira) : name === 'inbox-feed' && providers.size > 0),
     provide() {
       throw new Error('Autopilot provides nothing')
     },
@@ -332,6 +359,7 @@ function fakeCtx(opts = {}) {
     opened: [],
     schedules: [],
     jev: opts.jev || null,
+    jira: opts.jira || null,
     openError: null,
     storage: opts.storage || fakeStorage(),
     appStorage: opts.appStorage || fakeAppStorage(),
@@ -525,4 +553,4 @@ function rule(id, o = {}) {
   }
 }
 
-module.exports = { NOW, MIN, HOUR, RULES_FILE, item, bare, fakeFeed, fakeJev, fakeStorage, fakeAppStorage, fakeClock, fakeCtx, flush, settle, drive, tempFolder, removeFolder, rule, CHAT, MAIL, JIRA }
+module.exports = { NOW, MIN, HOUR, RULES_FILE, item, bare, fakeFeed, fakeJev, fakeJira, fakeStorage, fakeAppStorage, fakeClock, fakeCtx, flush, settle, drive, tempFolder, removeFolder, rule, CHAT, MAIL, JIRA }

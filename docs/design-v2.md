@@ -357,7 +357,7 @@ Three additions, each with the decisions behind it.
 
 A rule has either `playbook` (a session) or `act: "<actionId>"` (one of the item's own actions), never both and never
 neither. `open` is refused (it opens a page for a person; nobody is there). An act rule may not have `check`, `model`,
-`effort`, `onChange` or `mode`: they describe a session, and a key that does nothing would mislead the reader of the
+`effort` or `mode` (and, until 0.4.0, `onChange`): they describe a session, and a key that does nothing would mislead the reader of the
 file. The rule calls the source's inbox-feed v2 `act(id, action)` through the same services path the snapshots use.
 
 - **No Claude, so no injection surface.** The item's text reaches a condition check and, with `jev`, a scoring model
@@ -414,6 +414,59 @@ An optional `base.md` in each level's folder: the person's standing instructions
 - **Visible and editable.** The panel's Playbooks tab shows per level whether it is in use and edits it (the same
   hash check as a playbook; an empty text removes the file); `ccc autopilot base [show|set] --global|--project`, `-`
   for stdin. Act rules have no prompt, so it does not reach them.
+
+## Autopilot 0.4.0: a live Jira condition, onChange on act rules (the user, 2026-11-06)
+
+The case: Jira's notification mails say that a ticket changed, not where it is now, and "mark them read unless the
+ticket is in progress" needs the ticket. Two additions.
+
+### The `jira.*` fields
+
+`jira.status`, `jira.category` (`new` | `indeterminate` | `done`), `jira.done`, `jira.mine`, `jira.assignee`,
+`jira.priority`, `jira.type`: the facts of `ctx.services.use('jira').issue(key, { maxAgeMs })` (bronos.jira's
+`jira` service v1, `services.uses.jira: 1`, optional like `jev`). Text fields take `is`, `isNot`, `contains`, `in`,
+`notIn`; the bools `is`. The same release adds `isNot` and `notIn` to the other text fields (`notIn` to
+`source`, `sourceKind`, `to` too), because "none of these statuses" is the natural way to write the rule; the old
+ops are unchanged. They live in `lib/conditions.js` like any field (`holds` reads the looked-up issue riding on the
+item as `item.jira`), so the loader, the panel's editor and `ccc autopilot format` need no second table.
+
+- **The key** is read from the item's title with a fixed pattern in `lib/jira.js`, never one from a rule (ReDoS, and
+  a rule author should not need to know). A key in parentheses wins (`[JIRA] (ABC-123) Summary`, Jira's own mail
+  shape), else the first word shaped `[A-Z][A-Z0-9_]+-[1-9][0-9]*`. The order exists because a summary can hold a
+  key-shaped word of its own ("Support UTF-8 in exports") that the loose pattern would take first. The shape also
+  satisfies the service's own key rule (letters, digits, `_`, a dash, a number, 64 characters at most).
+- **When.** `lib/match.js` leaves the `jira.*` conditions out of `matchRule` and judges them in `evaluate` only after
+  the rule's sources, hours, other conditions and (act rule) newness and offered action held, and before `jev`. An item
+  that is not Jira mail therefore never costs a call, and neither does a rule that is off or out of hours. "Also
+  matched" uses lookups already made and never starts one. A rule that already ran on this rev skips its lookup (the
+  host's once-per-rev check follows), so a same-rev event costs none.
+- **Freshness.** `maxAgeMs = clamp(now - item.time, 15 s, 5 min)`; the service clamps to 15 s..1 h. The answer is never
+  older than the item, so the mail about a status change is judged against the status after it. One lookup per item
+  revision, kept 5 minutes in memory and shared by every rule that asks.
+- **False, or retry.** Two kinds of failure, never mixed up. *False*: no key in the title, no jira provider, an issue
+  the service says it does not know or the token may not see ("not found (404)", "(403)"), not configured. The condition
+  does not hold, the next rule may take the item, the log has a `jira` line with the reason. *Retry*: the service's
+  refusals for its limits (`jira: busy ...`, `jira: too many ...`), a network failure, a timeout, an unreadable answer.
+  These say nothing about the issue, so the decision is Jev-unavailable's: the item waits, no lower rule fires, it is
+  decided again after 10 minutes. Unlike Jev's path (which retries as long as the outage lasts) a lookup gives up after
+  4 tries and the condition becomes false, logged, so a permanently broken Jira plugin cannot hold an item for ever. Own
+  pacing (2 lookups at a time, a queue of 200) keeps a burst of new mails from drawing the service's refusals.
+- **Without a provider** the rules stay loadable (the plugin may come later); `ccc autopilot status` and `reload` carry
+  a warning on each rule with `jira.*` conditions, as a missing Jev is shown, and each item's evaluation is false.
+- **Dry run.** Each row's reason carries the key found (`title names ABC-123`) and, with a lookup, the status. Without
+  `--jira` a rule that got that far says "would look up ABC-123 in Jira, read-only" and holds the rows below it, as a
+  Jev step does without `--jev`. `--jira` makes the real lookups through `lookupOnce` (no cache or timer of the live
+  path), at most 20 a run.
+
+### `onChange` on act rules
+
+An act rule with `"onChange": true` runs again on each new rev of an item (today: new items only). Its conditions are
+judged again, `jira.*` ones included, once per rev (the same `state.fired` rev check a session rule uses). `isNew`
+is the only thing `onChange` changes in `actBlock`; the action must still be offered now. Gmail's rev is the newest
+message id, so the act's own effect (read) does not change it, and an item whose read state changes is decided again
+with the same rev and does nothing: no loop. The session-only keys (`mode`, `check`, `model`, `effort`) stay refused.
+Limits and cooldown count acts, as before; lookups are not counted. The first run on a baseline item needs a change,
+as any item.
 
 ## Core change (app 0.11.0)
 
@@ -496,6 +549,10 @@ the level the person names, `rules.json` left in place. Playbooks need no change
 - Levels: both folders loaded, project rules first, the same id at both levels is two rules, a playbook resolves in its
   own level, refs in the log, prompt and CLI; writes without a level refused when both folders exist; a level flag for
   a level with no folder refused; the v1 `rules.json` is never read or written, and shows the note without a problem.
+- Jira (0.4.0, test/jira.test.js): the key (parenthesised first, UTF-8 not preferred, none), maxAgeMs from the item's
+  time, `isNot`/`notIn` and the `jira.*` ops and values, no lookup before the other conditions held, no provider or an
+  unknown key is false and the next rule takes the item, busy/too many/network is a retry (10 minutes, 4 tries), an act
+  rule's `onChange` once per rev and not on the same rev, limits count acts, the dry run's key/would-look-up/status.
 - Claims: won and lost (also at the same moment), released only by the owner, stale only after the clock AND the
   passes (not after a sleep, not by a burst of passes), the old owner sees a takeover, the sweep (stale, own leftover,
   orphan counter, old take lock, other keys untouched), re-adoption by run id; with two hosts on one store: one tab,

@@ -70,6 +70,8 @@ const R = require('./lib/rules')
 const S = require('./lib/schema')
 const { matchRule, evaluate, outsiderWarning } = require('./lib/match')
 const { createJev } = require('./lib/jev')
+const { createJira, lookupOnce, keyOfTitle } = require('./lib/jira')
+const C = require('./lib/conditions')
 const { newMarker, newRunId, buildPrompt, deliveryText } = require('./lib/prompt')
 const { createState } = require('./lib/state')
 const RUNS = require('./lib/runs')
@@ -94,9 +96,13 @@ const DEBOUNCE_MS = 1000
 const REFRESH_S = 60
 // The dry run asks Jev at most this often (each ask is a paid request and the CLI has 30 s).
 const DRY_JEV_MAX = 10
+// ...and makes at most this many Jira lookups with --jira (read-only, but Jira's service allows 30 a minute).
+const DRY_JIRA_MAX = 20
+const DRY_JIRA_MS = 20000
 const DRY_MAX = 100
 const EXAMPLES_DIR = path.join(__dirname, '..', 'examples')
 // An app before 0.11 drops sessions.open's model and effort without a word (design-v2 "Shipped details").
+const JIRA_NOTE = 'this rule has jira.* conditions, but no enabled plugin provides the jira service in this project (bronos.jira): they never hold, so the rule never fires'
 const MODEL_NOTE = 'model and effort need cc-cockpit 0.11: this app ignores them and starts the session with your default'
 const OLD_APP = 'Autopilot needs cc-cockpit 0.9.7 or newer (ctx.services.useAll). Update the app.'
 
@@ -216,7 +222,25 @@ function createAutopilot(ctx, opts = {}) {
    */
   // `live`: the item's newness from the store (an act rule fires on new items only); the dry run leaves
   // it out, so every current item is judged as if it had just come in (its question is "would it fire").
-  const evalOpts = (jevAnswer, live = false) => ({ kindOf, now: now(), jevAnswer, jevCached: jev.cached, ...(live ? { isNew: (pluginId, it) => store.isNew(pluginId, it.id, it.rev) } : {}) })
+  // `jiraOpts`: the Jira lookups (live: lib/jira.js; the dry run: its own). `fired` (live only): the rule already
+  // ran on this rev, so its Jira lookup is skipped (a same-rev event, such as marking the mail read, costs none).
+  const evalOpts = (jevAnswer, live = false, jiraOpts = null) => ({
+    kindOf,
+    now: now(),
+    jevAnswer,
+    jevCached: jev.cached,
+    ...(live
+      ? {
+          isNew: (pluginId, it) => store.isNew(pluginId, it.id, it.rev),
+          jira: jira.answer,
+          jiraCached: jira.cached,
+          fired: (rule, pluginId, it) => {
+            const rec = state.fired(rule.ref, pluginId, it.id)
+            return Boolean(rec) && (!rule.onChange || rec.rev === it.rev)
+          },
+        }
+      : jiraOpts || {}),
+  })
   const kindOf = (pluginId) => {
     const s = store.get(pluginId)
     return s ? s.desc.kind : null
@@ -230,6 +254,9 @@ function createAutopilot(ctx, opts = {}) {
     const w = outsiderWarning(rule, kindOf)
     const out = w ? [w, ...rule.warnings] : [...rule.warnings]
     if ((rule.model || rule.effort) && runs.support() === 'no') out.push(MODEL_NOTE)
+    // The jira.* conditions need the Jira plugin (bronos.jira) in this project: without a provider they never
+    // hold (checked per item, so a rule is not dropped; it is shown here, as a missing Jev is in the panel).
+    if (rule.when.some(C.isJira) && !jira.available()) out.push(JIRA_NOTE)
     return out
   }
 
@@ -561,7 +588,8 @@ function createAutopilot(ctx, opts = {}) {
     }
     if (ev.decision === 'retry') {
       waiting.set(key, { pluginId, id: it.id })
-      await log({ at: now(), ...itemOfEntry(ev.rule, { pluginId }, it), step: 'jev', skip: `${ev.reason}; asked again in 10 min, no lower rule fires meanwhile` })
+      const jiraWait = ev.waitFor === 'jira'
+      await log({ at: now(), ...itemOfEntry(ev.rule, { pluginId }, it), step: jiraWait ? 'jira' : 'jev', skip: `${ev.reason}; ${jiraWait ? 'looked up' : 'asked'} again in 10 min, no lower rule fires meanwhile` })
       return
     }
     waiting.delete(key)
@@ -570,7 +598,7 @@ function createAutopilot(ctx, opts = {}) {
     // An act rule above the deciding one whose action the item does not offer (design: "skip the rule,
     // log why, fall through"): its line, since the person asks "why did my rule not run".
     if (ev.decision === 'fire') {
-      for (const tr of ev.trace) if (tr.step === 'action') await log({ at: now(), ...itemOfEntry(tr.rule, { pluginId }, it), step: 'action', skip: tr.skip })
+      for (const tr of ev.trace) if (tr.step === 'action' || tr.step === 'jira') await log({ at: now(), ...itemOfEntry(tr.rule, { pluginId }, it), step: tr.step, skip: tr.skip })
     }
     if (ev.decision === 'none') {
       // What a person would ask about ("why did my rule not fire?"): a rule that matched on fields but
@@ -805,6 +833,9 @@ function createAutopilot(ctx, opts = {}) {
   }
 
   const jev = createJev({ store: appStore, services: ctx.services, onAnswer: onJevAnswer, now, timers, log: ctx.log })
+  // The Jira lookups for jira.* conditions: an answer or a due retry decides the waiting item again, the
+  // way a Jev answer does (the item is in `waiting`, so onJevAnswer picks it up).
+  const jira = createJira({ services: ctx.services, onAnswer: onJevAnswer, now, timers, log: ctx.log })
   let jevLoadedAt = -Infinity
 
   // ---- the dry run ----
@@ -852,8 +883,11 @@ function createAutopilot(ctx, opts = {}) {
    * with `rule` already checked. It is decided as on, in the place of the stored rule of its id in its
    * level or else at `at` (a position in that level's rules file; null: the end of that level), and only
    * its rows are kept, so the answer to "would my edit fire" needs no write and no switch-on.
+   * The jira.* conditions (lib/jira.js) are looked up only with `withJira` (`--jira`: real, read-only calls
+   * of the jira service, at most DRY_JIRA_MAX, each item's key from its title); without it a rule that
+   * got that far says "would look up KEY" and the rows below it wait, as for a Jev step.
    */
-  async function dryRun(ruleSel, withJev, candidate = null, levelOnly = null) {
+  async function dryRun(ruleSel, withJev, candidate = null, levelOnly = null, withJira = false) {
     await reloadRules()
     let all = loaded.rules
     let cand = null
@@ -884,6 +918,23 @@ function createAutopilot(ctx, opts = {}) {
     const askedKeys = new Set()
     const failed = new Map()
     let asked = 0
+    // The Jira answers of this run: item → `{ key, issue | no | retry }`; own to the dry run (the live cache
+    // and its retry timers are not touched). `wanted`: the lookups the last pass needs.
+    const dryJira = new Map()
+    const wanted = new Map()
+    let lookups = 0
+    const jiraPending = new Set()
+    const dryJiraAnswer = (pluginId, it) => {
+      const key = keyOfTitle(it.title)
+      if (!key) return { key: null, no: 'no Jira issue key in the title' }
+      const k = keyOf(pluginId, it.id)
+      if (dryJira.has(k)) return dryJira.get(k)
+      if (withJira && !jira.available()) return { key, no: 'no enabled plugin provides the jira service in this project (bronos.jira)' }
+      if (withJira && lookups < DRY_JIRA_MAX) wanted.set(k, { pluginId, it, key })
+      jiraPending.add(k)
+      return { key, pending: true }
+    }
+    const jiraOpts = { jira: dryJiraAnswer, jiraCached: (pluginId, it) => dryJira.get(keyOf(pluginId, it.id)) || null }
     const dryAnswer = (rule, pluginId, it) => {
       const c = jev.cached(rule, pluginId, it)
       if (c) return c
@@ -892,10 +943,24 @@ function createAutopilot(ctx, opts = {}) {
       if (withJev && !jev.available()) return { unavailable: 'jev unavailable: no enabled plugin provides the jev service' }
       return { pending: true }
     }
+    // The Jira lookups first (a rule's jira.* conditions are judged before its Jev step): each pass decides
+    // every item, the lookups it needs are made (in parallel, bounded), and the pass repeats since an
+    // answer that makes a rule fail lets the next rule's lookup come up.
+    for (let round = 0; withJira && round < DRY_JIRA_MAX && lookups < DRY_JIRA_MAX; round++) {
+      wanted.clear()
+      for (const { pluginId, it } of pairs) evaluate(all, pluginId, it, evalOpts(dryAnswer, false, jiraOpts))
+      if (!wanted.size) break
+      const todo = [...wanted.entries()].slice(0, DRY_JIRA_MAX - lookups)
+      lookups += todo.length
+      let timer
+      const late = new Promise((r) => { timer = timers.setTimeout(r, opts.dryJiraMs ?? DRY_JIRA_MS) })
+      await Promise.race([Promise.all(todo.map(async ([k, w]) => dryJira.set(k, { key: w.key, ...(await lookupOnce(ctx.services, w.key, w.it, now())) }))), late])
+      timers.clearTimeout(timer)
+    }
     for (let round = 0; withJev && round < DRY_JEV_MAX && asked < DRY_JEV_MAX && jev.available(); round++) {
       const asks = []
       for (const { pluginId, it } of pairs) {
-        const ev = evaluate(all, pluginId, it, evalOpts(dryAnswer))
+        const ev = evaluate(all, pluginId, it, evalOpts(dryAnswer, false, jiraOpts))
         if (ev.decision !== 'wait' || asked >= DRY_JEV_MAX) continue
         const k = `${ev.rule.jev.question}\u0000${keyOf(pluginId, it.id)}`
         if (askedKeys.has(k)) continue
@@ -921,7 +986,7 @@ function createAutopilot(ctx, opts = {}) {
       results.push(row)
     }
     for (const { pluginId, it } of pairs) {
-      const ev = evaluate(all, pluginId, it, evalOpts(dryAnswer))
+      const ev = evaluate(all, pluginId, it, evalOpts(dryAnswer, false, jiraOpts))
       const row = (rule, why, fire, verdict, score) => ({ rule: rule.ref, source: pluginId, itemId: it.id, title: it.title, why, fire, verdict, ...(score !== undefined ? { score } : {}) })
       for (const tr of ev.trace) {
         const verdict = tr.step === 'hours' ? `outside its hours ${S.hoursLabel(tr.rule.hours)} right now (local time): it would not fire` : tr.skip
@@ -942,13 +1007,18 @@ function createAutopilot(ctx, opts = {}) {
           else each(r, m.why)
         }
       }
-      if (ev.decision === 'wait') {
+      if (ev.decision === 'wait' && ev.waitFor === 'jira') {
+        const verdict = !withJira ? `would look up ${ev.jiraKey} in Jira, read-only, to judge its jira.* conditions (add --jira to do it)` : `the Jira lookup of ${ev.jiraKey} did not finish: at most ${DRY_JIRA_MAX} per dry run`
+        add(row(ev.rule, ev.why, null, `${verdict}; no lower rule fires until it answers`))
+        below((r, w) => add(row(r, w, null, `waits for the Jira lookup of ${ev.rule.ref}, which comes first`)))
+      } else if (ev.decision === 'wait') {
         const verdict = !withJev ? `the Jev step was not asked (would need ≥ ${ev.rule.jev.min}; add --jev)` : `Jev not asked or not answered: at most ${DRY_JEV_MAX} questions per dry run`
         add(row(ev.rule, ev.why, null, `${verdict}; no lower rule fires until it answers`))
         below((r, w) => add(row(r, w, null, `waits for the Jev answer of ${ev.rule.ref}, which comes first`)))
       } else if (ev.decision === 'retry') {
-        add(row(ev.rule, ev.why, false, `${ev.reason}; no lower rule fires (asked again in 10 min)`))
-        below((r, w) => add(row(r, w, false, `${ev.rule.ref} comes first and its Jev is unavailable`)))
+        const jv = ev.waitFor === 'jira'
+        add(row(ev.rule, ev.why, false, `${ev.reason}; no lower rule fires (${jv ? 'looked up' : 'asked'} again in 10 min)`))
+        below((r, w) => add(row(r, w, false, `${ev.rule.ref} comes first and its ${jv ? 'Jira lookup failed' : 'Jev is unavailable'}`)))
       } else if (ev.decision === 'fire') {
         const r = ev.rule
         const rec = state.fired(r.ref, pluginId, it.id)
@@ -974,7 +1044,7 @@ function createAutopilot(ctx, opts = {}) {
         })
       }
     }
-    lastDry = { at: t, on: state.enabled(), jev: Boolean(withJev), rules: ruleRef ? 1 : levelOnly ? all.filter((r) => r.level === levelOnly).length : all.length, sources: list.length, items: pairs.length, results, cut, ...(cand ? { candidate: cand } : {}) }
+    lastDry = { at: t, on: state.enabled(), jev: Boolean(withJev), jira: Boolean(withJira), jiraRules: jiraPending.size > 0, rules: ruleRef ? 1 : levelOnly ? all.filter((r) => r.level === levelOnly).length : all.length, sources: list.length, items: pairs.length, results, cut, ...(cand ? { candidate: cand } : {}) }
     return lastDry
   }
 
@@ -1656,7 +1726,7 @@ function createAutopilot(ctx, opts = {}) {
               }
               // `--project down` names project:down; `--project` alone keeps that level's rows.
               const sel = p.rule && p.level && !p.rule.includes(':') ? S.refOf(p.level, p.rule) : p.rule
-              const d = await dryRun(sel, p.jev, candidate, !p.rule && !candidate ? p.level || null : null)
+              const d = await dryRun(sel, p.jev, candidate, !p.rule && !candidate ? p.level || null : null, p.jira === true)
               publish()
               if (d.error) return { stderr: `${d.error}\n`, code: 1 }
               return { stdout: CLI.formatDry(d) }
@@ -1711,6 +1781,7 @@ function createAutopilot(ctx, opts = {}) {
     if (publishTimer) timers.clearTimeout(publishTimer)
     store.dispose()
     jev.dispose()
+    jira.dispose()
     for (const d of disposers) if (typeof d === 'function') d()
     return claims.releaseAll().then(() => {}, warn('claims'))
   }

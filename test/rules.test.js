@@ -317,8 +317,8 @@ test('act or playbook: exactly one; act is an action id and never open', () => {
 })
 
 test('an act rule refuses every session key, each under its own field; a session rule takes mode', () => {
-  const e = S.checkRule(actRaw({ mode: 'investigate', check: 'x', model: 'sonnet', effort: 'low', onChange: false })).errors
-  assert.deepEqual(e.map((x) => x.field), ['mode', 'check', 'model', 'effort', 'onChange'])
+  const e = S.checkRule(actRaw({ mode: 'investigate', check: 'x', model: 'sonnet', effort: 'low' })).errors
+  assert.deepEqual(e.map((x) => x.field), ['mode', 'check', 'model', 'effort'])
   for (const x of e) assert.match(x.message, /is for a session rule: an act rule runs "markRead" itself and opens no session/)
   // jev, hours, limits and the rest are an act rule's as any rule's.
   assert.deepEqual(S.checkRule(actRaw({ jev: { question: 'Done?' }, hours: { from: '08:00', to: '18:00' }, limits: { perDay: 50, cooldownMinutes: 5 }, name: 'n', enabled: false })).errors, [])
@@ -332,7 +332,11 @@ test('an act rule refuses every session key, each under its own field; a session
 })
 
 test('canonicalRule: an act rule is written with act and no session key; mode only when it is act', () => {
-  assert.deepEqual(Object.keys(S.canonicalRule({ ...actRaw(), check: 'stale', model: 'sonnet', onChange: true, mode: 'act' }, null)), ['id', 'enabled', 'sources', 'when', 'act', 'limits'])
+  assert.deepEqual(Object.keys(S.canonicalRule({ ...actRaw(), check: 'stale', model: 'sonnet', mode: 'act' }, null)), ['id', 'enabled', 'sources', 'when', 'act', 'limits'])
+  // 0.4.0: onChange is an act rule's too, written only when set.
+  assert.deepEqual(Object.keys(S.canonicalRule({ ...actRaw(), onChange: true }, null)), ['id', 'enabled', 'sources', 'when', 'act', 'onChange', 'limits'])
+  assert.equal(S.checkRule(actRaw({ onChange: true })).rule.onChange, true)
+  assert.match(S.checkRule(actRaw({ onChange: 'yes' })).errors[0].message, /^onChange must be true or false/)
   assert.equal(Object.hasOwn(S.canonicalRule({ ...rule('a'), mode: 'investigate' }, null), 'mode'), false, 'the default stays out of the file')
   const actMode = S.canonicalRule({ ...rule('a'), mode: 'act' }, null)
   assert.deepEqual(Object.keys(actMode).slice(0, 7), ['id', 'enabled', 'sources', 'when', 'playbook', 'mode', 'check'])

@@ -97,7 +97,7 @@
   // never what an unattended rule should do, and a burst of items would open a burst of windows.
   const ACT_REFUSED = Object.freeze(['open'])
   // The keys only a session reads: refused on an act rule (see the header).
-  const SESSION_KEYS = Object.freeze(['mode', 'check', 'model', 'effort', 'onChange'])
+  const SESSION_KEYS = Object.freeze(['mode', 'check', 'model', 'effort'])
   // A session rule's mode: `investigate` (the default, the frame's "change nothing") or `act` (only the
   // actions the playbook lists under its "Allowed actions" heading). lib/prompt.js words each.
   const MODE_LIST = Object.freeze(['investigate', 'act'])
@@ -326,9 +326,10 @@
     // An act rule: `act` and no playbook (both set is an error below, and the rule is then judged as a session one).
     const isAct = act !== undefined && pb === undefined
     const onChange = own(raw, 'onChange')
+    // onChange is for both kinds since 0.4.0: a session rule sends the new version to its tab, an act rule
+    // runs again on each new rev (its conditions, the jira.* ones too, are judged again).
     add(() => {
-      // On an act rule its presence is the error (below), whatever the value.
-      if (!isAct && onChange !== undefined && typeof onChange !== 'boolean') bad('onChange must be true or false')
+      if (onChange !== undefined && typeof onChange !== 'boolean') bad('onChange must be true or false')
     })
     const sources = add(() => sourcesOf(own(raw, 'sources')))
     const when = add(() => whenOf(own(raw, 'when')))
@@ -397,7 +398,7 @@
       check: isAct ? null : text || null,
       model: isAct ? null : model || null,
       effort: isAct ? null : effort || null,
-      onChange: !isAct && onChange === true,
+      onChange: onChange === true,
       limits,
     }
     return { rule, warnings, errors }
@@ -488,6 +489,8 @@
       if (r.effort) out.effort = r.effort
       out.onChange = r.onChange === true
     }
+    // An act rule writes onChange only when set (the key stays out of every file written before 0.4.0).
+    if (isAct && r.onChange === true) out.onChange = true
     const l = r.limits || {}
     const d = limitDefaults(isAct)
     out.limits = { perDay: l.perDay === undefined ? d.perDay : l.perDay, cooldownMinutes: l.cooldownMinutes === undefined ? d.cooldownMinutes : l.cooldownMinutes }

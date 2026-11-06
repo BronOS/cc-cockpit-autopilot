@@ -36,7 +36,7 @@ default**: a fresh install fires nothing until you switch it on.
 5. Switch it on: the switch in the panel, or `ccc autopilot on`.
 
 Optional: the `jev` plugin, for rules with a Jev question. Without it such an item fires nothing until
-one is back.
+one is back. Also optional: the `bronos.jira` plugin, for rules with `jira.*` conditions.
 
 ## Settings
 
@@ -101,20 +101,21 @@ key is ignored with a warning.
 | `check` | up to 500 characters: what the session verifies first against the full item | none |
 | `model` | `haiku`, `sonnet`, `opus`, `fable` (needs app 0.11) | your default |
 | `effort` | `low`, `medium`, `high`, `xhigh`, `max` (needs app 0.11) | your default |
-| `onChange` | send newer versions of the item into its tab | `false` |
+| `onChange` | a session rule: send newer versions of the item into its tab; an act rule: run again on each new version (see Jira conditions) | `false` |
 | `limits.perDay` | 1-100 sessions (or actions) in a rolling 24 hours | 10 (an act rule: 100) |
 | `limits.cooldownMinutes` | 0-1440 minutes between two sessions (or actions) of the rule; 0 is no cooldown | 30 (an act rule: 0) |
 
-A rule has `playbook` or `act`, never both. `check`, `model`, `effort`, `onChange` and `mode` belong to a
-session, so an act rule may not have them.
+A rule has `playbook` or `act`, never both. `check`, `model`, `effort` and `mode` belong to a
+session, so an act rule may not have them; `onChange` is allowed on both.
 
 - **`sources` is required, on purpose.** A rule written with Chat in mind must not fire on incoming
   email by omission, since anyone outside can send mail. `["*"]` and mail sources are flagged as
   something outsiders can trigger. An id with no running feed is kept ("no such source here").
 - **Conditions** are Inbox's: `field`, `op`, `value`, text compared case-insensitively, no regular
   expressions. Fields: `source`, `sourceKind`, `title`, `preview`, `from.name`, `from.address`, `to`,
-  `mentionsMe`, `read`, `place.kind`, `place.name`, `place.status`, `labels`, `time`. `ccc autopilot
-  format` lists each with its ops.
+  `mentionsMe`, `read`, `place.kind`, `place.name`, `place.status`, `labels`, `time`, and the live
+  `jira.*` fields (below). Text fields take `is`, `isNot`, `contains`, `in` and `notIn` where they make
+  sense. `ccc autopilot format` lists each with its ops.
 - **`when` and `jev`** say which items the rule is about; fields are checked first, so Jev is asked
   only about items that pass them. With neither, every new item of the sources starts a session (limits
   still apply): the panel asks you to confirm.
@@ -126,7 +127,43 @@ session, so an act rule may not have them.
   stops.
 - **`limits`**: a run refused by a limit is logged and not queued.
 - **`onChange`**: by default a rule fires once per item and a later reply is only logged. With
-  `true` a newer version is sent into the same tab (see Updates).
+  `true` a newer version is sent into the same tab (see Updates). On an act rule `true` runs the
+  action again on each new version of the item (see Jira conditions).
+
+## Jira conditions (`jira.*`), 0.4.0
+
+Some mail only tells you that a ticket changed; whether it still matters depends on where the ticket is
+now. The fields `jira.status`, `jira.category` (`new`, `indeterminate`, `done`), `jira.done`, `jira.mine`,
+`jira.assignee`, `jira.priority` and `jira.type` read the issue the item's title names, live, through the
+optional `jira` service of the `bronos.jira` plugin (declared in `services.uses`; without a provider they
+never hold and `ccc autopilot reload` warns).
+
+```json
+{ "id": "jira-mail-mark-read", "sources": ["bronos.gmail"], "onChange": true,
+  "when": [{ "field": "from.address", "op": "is", "value": "jira@example.atlassian.net" },
+           { "field": "title", "op": "startsWith", "value": "[JIRA]" },
+           { "field": "jira.status", "op": "notIn", "value": ["In Progress", "Backlog"] }],
+  "act": "markRead" }
+```
+
+- **The key** comes from the title by a fixed pattern, never one from a rule: a key in parentheses wins
+  (`[JIRA] (ABC-123) Summary`), else the first word shaped like `ABC-123`. A summary with `UTF-8` in it
+  does not take the key's place. No key: the condition is false.
+- **When the lookup runs.** Only after every other check of the rule held (sources, hours, the other
+  conditions, and for an act rule the newness and the action), before `jev`. Mail that is not from Jira
+  costs no call. One lookup per version of an item, shared by the rules that ask; the service's own limits
+  (2 at a time, 30 a minute) are respected by a small queue here.
+- **Fresh.** The lookup asks for an answer no older than the item (its age, 15 seconds to 5 minutes), so
+  a status-change mail is judged against the status after the change.
+- **False or retry.** No key, no Jira plugin, an issue the plugin does not know or may not see: the
+  condition is false, the next rule may take the item, the log says why (step `jira`). A busy or failing
+  service (its limits, the network) says nothing about the issue: the item waits like a Jev outage (no lower
+  rule fires), is looked up again after 10 minutes, at most 4 tries; then it is false, logged.
+- **`onChange` on an act rule.** The rule runs again on each new version (rev) of the item, its conditions
+  judged again, once per version. Gmail's rev is the newest message id, so marking the mail read does not
+  change it and cannot loop. Limits and cooldown count the actions, not the lookups.
+- **Dry run.** `ccc autopilot test` shows the key found and "would look up ABC-123"; `--jira` makes the
+  real (read-only, at most 20) lookups and shows the status got, or the error, and the act.
 
 **No burst at start.** Items in the feeds when the app starts, when a feed joins or when you switch
 Autopilot on are the baseline: they never fire. Only items that appear or change after it do.
@@ -311,8 +348,9 @@ Tests passing do not prove safety; they catch regressions.
 ccc autopilot [status]                       on or off, both folders, rules, problems, running, last runs
 ccc autopilot on | off                       the switch (on takes the baseline first)
 ccc autopilot log [n]                        the last n entries (default 20, at most 200)
-ccc autopilot test [rule|<json>|-] [--at <n>] [--jev] [--project|--global]
-                                             dry run; a stored rule id, or a rule not yet stored; Jev only with --jev
+ccc autopilot test [rule|<json>|-] [--at <n>] [--jev] [--jira] [--project|--global]
+                                             dry run; a stored rule id, or a rule not yet stored; Jev only with --jev,
+                                             Jira lookups (read-only) only with --jira
 ccc autopilot reload                         read both folders again and list the problems
 ccc autopilot format                         the format: every field, type and limit
 ccc autopilot rules [export|add|set|rm|move|enable|disable] [--project|--global]

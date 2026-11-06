@@ -16,6 +16,8 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function () {
   const KINDS = ['chat', 'mail', 'issues', 'other']
   const TO = ['direct', 'group', 'cc', 'none']
+  // Jira's status categories (the jira service's `category`): the three a status can belong to.
+  const CATEGORIES = ['new', 'indeterminate', 'done']
   const MAX_MINUTES = 525600
   const MAX_VALUE = 200
   const MAX_IN = 50
@@ -24,24 +26,41 @@
   /**
    * The field table: which ops each field takes and what its value is.
    * `value`: `text` (a string, 1-200), `kind` / `to` (one of a fixed list), `bool`, `read` (true, false
-   * or null), `minutes` (whole number 1..525600). An `in` op takes a list (1-50) of the field's value.
+   * or null), `minutes` (whole number 1..525600), `category` (a Jira status category). An `in` or `notIn`
+   * op takes a list (1-50) of the field's value.
+   *
+   * The `jira.*` fields (0.4.0) are not on the item: they are the issue the item's title names, looked up
+   * through the `jira` service after every other condition of the rule held (lib/jira.js, lib/match.js).
+   * `isJira` below tells them apart; here they are plain fields, so the loader, the panel and the format
+   * text need no special case.
    */
+  const JIRA_TEXT_OPS = ['is', 'isNot', 'contains', 'in', 'notIn']
   const FIELDS = Object.freeze({
-    source: { ops: ['is', 'isNot', 'in'], value: 'text' },
-    sourceKind: { ops: ['is', 'isNot', 'in'], value: 'kind' },
+    source: { ops: ['is', 'isNot', 'in', 'notIn'], value: 'text' },
+    sourceKind: { ops: ['is', 'isNot', 'in', 'notIn'], value: 'kind' },
     title: { ops: ['contains', 'notContains', 'startsWith', 'is'], value: 'text' },
     preview: { ops: ['contains', 'notContains', 'startsWith', 'is'], value: 'text' },
-    'from.name': { ops: ['is', 'contains', 'endsWith', 'in'], value: 'text' },
-    'from.address': { ops: ['is', 'contains', 'endsWith', 'in'], value: 'text' },
-    to: { ops: ['is', 'in'], value: 'to' },
+    'from.name': { ops: ['is', 'isNot', 'contains', 'endsWith', 'in', 'notIn'], value: 'text' },
+    'from.address': { ops: ['is', 'isNot', 'contains', 'endsWith', 'in', 'notIn'], value: 'text' },
+    to: { ops: ['is', 'isNot', 'in', 'notIn'], value: 'to' },
     mentionsMe: { ops: ['is'], value: 'bool' },
     read: { ops: ['is'], value: 'read' },
-    'place.kind': { ops: ['is', 'contains', 'in'], value: 'text' },
-    'place.name': { ops: ['is', 'contains', 'in'], value: 'text' },
-    'place.status': { ops: ['is', 'contains', 'in'], value: 'text' },
+    'place.kind': { ops: ['is', 'isNot', 'contains', 'in', 'notIn'], value: 'text' },
+    'place.name': { ops: ['is', 'isNot', 'contains', 'in', 'notIn'], value: 'text' },
+    'place.status': { ops: ['is', 'isNot', 'contains', 'in', 'notIn'], value: 'text' },
     labels: { ops: ['has', 'hasNot', 'hasPrefix'], value: 'text' },
     time: { ops: ['newerThan', 'olderThan'], value: 'minutes' },
+    'jira.status': { ops: JIRA_TEXT_OPS, value: 'text' },
+    'jira.category': { ops: ['is', 'isNot', 'in', 'notIn'], value: 'category' },
+    'jira.done': { ops: ['is'], value: 'bool' },
+    'jira.mine': { ops: ['is'], value: 'bool' },
+    'jira.assignee': { ops: JIRA_TEXT_OPS, value: 'text' },
+    'jira.priority': { ops: JIRA_TEXT_OPS, value: 'text' },
+    'jira.type': { ops: JIRA_TEXT_OPS, value: 'text' },
   })
+
+  /** A condition on the looked-up Jira issue (not on the item itself). */
+  const isJira = (cond) => typeof cond.field === 'string' && cond.field.startsWith('jira.')
 
   /** Case-insensitive form of a string: NFKC then lower case (a full-width "ＡＢＣ" matches "abc"). */
   const norm = (s) => String(s).normalize('NFKC').toLowerCase()
@@ -58,6 +77,8 @@
         return KINDS.includes(v) ? v : undefined
       case 'to':
         return TO.includes(v) ? v : undefined
+      case 'category':
+        return CATEGORIES.includes(v) ? v : undefined
       case 'bool':
         return typeof v === 'boolean' ? v : undefined
       case 'read':
@@ -82,7 +103,7 @@
     const spec = FIELDS[field]
     if (!spec.ops.includes(op)) return null
     const v = Object.hasOwn(raw, 'value') ? raw.value : undefined
-    if (op === 'in') {
+    if (op === 'in' || op === 'notIn') {
       if (!Array.isArray(v) || v.length < 1 || v.length > MAX_IN) return null
       const list = []
       for (const x of v) {
@@ -123,6 +144,17 @@
         return Array.isArray(item.labels) ? item.labels : []
       case 'time':
         return item.time
+      // The looked-up issue rides on the item as `jira` (lib/match.js sets it only after the lookup).
+      // done and mine are strictly true/false so a bool condition compares like mentionsMe does.
+      case 'jira.done':
+      case 'jira.mine':
+        return Boolean(item.jira) && item.jira[field.slice(5)] === true
+      case 'jira.status':
+      case 'jira.category':
+      case 'jira.assignee':
+      case 'jira.priority':
+      case 'jira.type':
+        return item.jira ? item.jira[field.slice(5)] : undefined
       default:
         return undefined
     }
@@ -167,6 +199,8 @@
         return a === null || a !== w
       case 'in':
         return a !== null && w.includes(a)
+      case 'notIn':
+        return a === null || !w.includes(a)
       case 'contains':
         return a !== null && a.includes(w)
       case 'notContains':
@@ -195,5 +229,5 @@
     return String(a).slice(0, 80)
   }
 
-  return { KINDS, TO, FIELDS, MAX_IN, MAX_VALUE, MAX_MINUTES, norm, conditionOf, conditionText, actualText, holds, fieldOf }
+  return { KINDS, TO, CATEGORIES, FIELDS, isJira, MAX_IN, MAX_VALUE, MAX_MINUTES, norm, conditionOf, conditionText, actualText, holds, fieldOf }
 })

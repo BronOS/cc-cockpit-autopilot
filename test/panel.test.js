@@ -278,14 +278,18 @@ test('condition editor: add, remove, field and op changes keep what fits, values
   assert.equal(V.condControl({ field: 'time', op: 'newerThan' }, T).type, 'number')
   assert.equal(V.condControl({ field: 'place.name', op: 'in' }, T).type, 'lines')
   assert.equal(V.condControl({ field: 'title', op: 'contains' }, T).type, 'text')
+  // 0.4.0: notIn is a list op like in; jira.category picks from Jira's three categories.
+  assert.equal(V.condControl({ field: 'jira.status', op: 'notIn' }, T).type, 'lines')
+  assert.deepEqual(V.condControl({ field: 'jira.category', op: 'is' }, T), { type: 'select', options: ['new', 'indeterminate', 'done'] })
+  assert.deepEqual(V.condSet([{ field: 'jira.status', op: 'is', value: 'Done' }], 0, { op: 'notIn' }, T)[0].value, ['Done'])
   assert.deepEqual(V.condOpOptions('time', T).map((o) => o.label), ['newer than (minutes)', 'older than (minutes)'])
   assert.deepEqual(V.condFieldOptions({ field: 'nope' }, T)[0], { value: 'nope', label: 'nope (not a field)' })
   // Every field with every op it offers, given a value of its kind, passes the loader's own check.
-  const sample = { text: 'x', kind: 'chat', to: 'direct', bool: true, read: null, minutes: 5 }
+  const sample = { text: 'x', kind: 'chat', to: 'direct', bool: true, read: null, minutes: 5, category: 'done' }
   for (const field of Object.keys(T.fields)) {
     for (const op of T.fields[field].ops) {
       const d = V.condSet(V.condSet(V.condAdd([], T), 0, { field }, T), 0, { op }, T)
-      const v = op === 'in' ? [sample[T.fields[field].value]] : sample[T.fields[field].value]
+      const v = op === 'in' || op === 'notIn' ? [sample[T.fields[field].value]] : sample[T.fields[field].value]
       const when = V.condSet(d, 0, { value: v }, T)
       assert.deepEqual(S.checkRule({ id: 'x', sources: ['*'], when, playbook: 'p' }).errors, [], `${field} ${op}`)
     }

@@ -49,10 +49,9 @@ it read needs no Claude, and a session would read an outsider's mail for nothing
 
 - **Act rule** (`act`): an action id the item offers: the well-known `markRead`, `markUnread`, `done` (done at the
   source: archive, resolve), or one the source adds (`ccc <source> show <id>` and the Inbox panel show an item's
-  actions). Never `open` (it opens a window for a person; refused). It runs **on new items only**, never on a
-  change of one, and only when the item offers that action **at that moment**; when it does not, the rule does not
+  actions). Never `open` (it opens a window for a person; refused). It runs **on new items only** (with `onChange` also on each new version of an item, below), and only when the item offers that action **at that moment**; when it does not, the rule does not
   hold and the next rule may take the item (logged as step `action`). An act rule has no `playbook`, `mode`,
-  `check`, `model`, `effort` or `onChange` (refused: they belong to a session). `sources`, `when`, `jev`, `hours`,
+  `check`, `model` or `effort` (refused: they belong to a session); `onChange` is allowed. `sources`, `when`, `jev`, `hours`,
   `limits`, first rule wins and the one-window claim apply as to any rule. Its limits count only actions that
   succeeded, and it is not counted in the 10-sessions-an-hour cap. Its default limits are 100 a day and no
   cooldown (a cooldown would leave a second matching mail within it unread), so leave `limits` out unless the
@@ -104,7 +103,7 @@ ccc autopilot playbooks set <name> <text|->     create or replace a playbook
 ccc autopilot playbooks rm <name>               delete a playbook (refused while a rule names it)
 ccc autopilot base [show] [--project|--global]  the level's base.md (both levels without a flag)
 ccc autopilot base set <text|->                 write that level's base.md; an empty text removes it
-ccc autopilot test [rule|<json>|-] [--at <n>] [--jev] [--project|--global]   dry run, nothing starts
+ccc autopilot test [rule|<json>|-] [--at <n>] [--jev] [--jira] [--project|--global]   dry run, nothing starts
 ccc autopilot reload                            read the files again and list the problems
 ccc autopilot format                            the format
 ccc autopilot log [n]                           the last runs and skips, newest first
@@ -201,28 +200,69 @@ retried after 10 minutes instead of falling through, so with no Jev provider suc
 
 `{ "field": ..., "op": ..., "value": ... }`, the same format as the Inbox plugin's rules. Text compares
 case-insensitively; there are no regular expressions. An `in` op takes a list of 1 to 50 values of the field's
-kind and holds when the item's value is one of them.
+kind and holds when the item's value is one of them; `notIn` holds when it is none of them (and for an item that lacks the field).
 
 | Field | Ops | Value |
 |---|---|---|
-| `source` | `is`, `isNot`, `in` | a source plugin id (text), for example `bronos.gmail` (use `sources` instead) |
-| `sourceKind` | `is`, `isNot`, `in` | `chat`, `mail`, `issues` or `other` |
+| `source` | `is`, `isNot`, `in`, `notIn` | a source plugin id (text), for example `bronos.gmail` (use `sources` instead) |
+| `sourceKind` | `is`, `isNot`, `in`, `notIn` | `chat`, `mail`, `issues` or `other` |
 | `title` | `contains`, `notContains`, `startsWith`, `is` | text |
 | `preview` | `contains`, `notContains`, `startsWith`, `is` | text |
-| `from.name` | `is`, `contains`, `endsWith`, `in` | text |
-| `from.address` | `is`, `contains`, `endsWith`, `in` | text (`endsWith` `@example.com` for a domain) |
-| `to` | `is`, `in` | `direct`, `group`, `cc` or `none` (how the item reached the person) |
+| `from.name` | `is`, `isNot`, `contains`, `endsWith`, `in`, `notIn` | text |
+| `from.address` | `is`, `isNot`, `contains`, `endsWith`, `in`, `notIn` | text (`endsWith` `@example.com` for a domain) |
+| `to` | `is`, `isNot`, `in`, `notIn` | `direct`, `group`, `cc` or `none` (how the item reached the person) |
 | `mentionsMe` | `is` | true or false |
 | `read` | `is` | true, false or null (null: the source has no read state) |
-| `place.kind` | `is`, `contains`, `in` | text: `channel`, `folder` or `project` |
-| `place.name` | `is`, `contains`, `in` | text (the channel, folder or project name) |
-| `place.status` | `is`, `contains`, `in` | text (for example a Jira status) |
+| `place.kind` | `is`, `isNot`, `contains`, `in`, `notIn` | text: `channel`, `folder` or `project` |
+| `place.name` | `is`, `isNot`, `contains`, `in`, `notIn` | text (the channel, folder or project name) |
+| `place.status` | `is`, `isNot`, `contains`, `in`, `notIn` | text (for example a Jira status) |
 | `labels` | `has`, `hasNot`, `hasPrefix` | text (one label) |
 | `time` | `newerThan`, `olderThan` | whole minutes, 1 to 525600 |
+| `jira.status` | `is`, `isNot`, `contains`, `in`, `notIn` | text: the issue's status name ("In Progress") |
+| `jira.category` | `is`, `isNot`, `in`, `notIn` | `new`, `indeterminate` or `done` (Jira's status category) |
+| `jira.done` | `is` | true or false: the issue is in the done category |
+| `jira.mine` | `is` | true or false: the issue is assigned to the person |
+| `jira.assignee` | `is`, `isNot`, `contains`, `in`, `notIn` | text: the assignee's name (none for an unassigned issue) |
+| `jira.priority` | `is`, `isNot`, `contains`, `in`, `notIn` | text: the priority name |
+| `jira.type` | `is`, `isNot`, `contains`, `in`, `notIn` | text: the issue type |
 
 Text values are 1 to 200 characters on one line. A field the item lacks holds only for the negative ops
 (`isNot`, `notContains`, `hasNot`). A read or label change of an item never starts a session (only a new item
 or a new version of one does), so `read is false` is rarely needed.
+
+### Jira conditions (`jira.*`)
+
+The `jira.*` fields are about the **Jira issue the item's title names**, read live, so they answer a question the
+mail does not ("is this ticket still In Progress?"). They need the `bronos.jira` plugin (its `jira` service) in the
+project; without it they never hold, the rule never fires, and `ccc autopilot reload` / `status` warn about it.
+
+- **The key** comes from the title with a fixed pattern (never one from a rule): a key in parentheses wins
+  (`[JIRA] (ABC-123) Summary`, the shape Jira's mails use), else the first word shaped like `ABC-123`
+  (`[JIRA] Ann assigned OPS-5 to you`). A summary that holds `UTF-8` therefore does not take the key's place.
+  No key in the title: the condition is false.
+- **When it runs**: only after every other check of the rule held (sources, hours, all non-`jira.*` conditions,
+  and for an act rule that the item is new or changed and offers the action), and before `jev`. So mail that is
+  not from Jira costs no lookup; the order inside `when` does not matter. One lookup per item version, shared by
+  every rule that asks.
+- **Fresh**: the lookup asks for an answer no older than the item, so a mail about a status change is judged
+  against the status after the change.
+- **False vs retry**: no key, no Jira plugin, an issue the plugin does not know or may not see: the condition is
+  false and the next rule may take the item (logged as step `jira`). A busy or failing Jira plugin (its limits, the
+  network) is not an answer about the issue: the item waits like a Jev outage (no lower rule fires), is looked up
+  again in 10 minutes, at most 4 tries, and then the condition is false (logged).
+- A mail made to match is still one outsiders can trigger; `jira.*` narrows the rule, it does not make a loose
+  `from` safe.
+
+Example, an act rule that marks Jira's mail read once its issue is neither In Progress nor Backlog, and again when
+a new message arrives in the thread (`onChange`):
+
+```json
+{ "id": "jira-mail-mark-read", "sources": ["bronos.gmail"], "onChange": true,
+  "when": [{ "field": "from.address", "op": "is", "value": "jira@example.atlassian.net" },
+           { "field": "title", "op": "startsWith", "value": "[JIRA]" },
+           { "field": "jira.status", "op": "notIn", "value": ["In Progress", "Backlog"] }],
+  "act": "markRead" }
+```
 
 ### Jev
 
@@ -232,7 +272,15 @@ the rule holds at `min` or above (`min` from 0 to 1, default 0.7; the question 1
 cached per item version. Use it when the wording varies too much for `contains`, and combine it with `when` so
 Jev is asked only about items that pass the cheap checks. It never sees the playbook.
 
-### onChange and its limits
+### onChange on an act rule
+
+An act rule with `"onChange": true` runs again on each **new version (rev)** of an item, judging its conditions
+again (the `jira.*` ones too: a mail's thread gets a new message and the ticket has moved on). Once per version: a
+change that is not a new version (marking the mail read does not move Gmail's rev) does not run it again, so it
+cannot loop. Limits and cooldown count the actions, not the lookups. The session limits below do not apply (no
+tab, nothing is delivered).
+
+### onChange and its limits (a session rule)
 
 By default a rule fires **once per item**: a reply or a new comment on the item is only logged ("updated, tab
 open"). With `"onChange": true` a newer version of the item is sent into the **same tab** that investigates it.
@@ -289,7 +337,9 @@ playbook is ignored with a warning.
 
 `ccc autopilot test` is a dry run over the items **in the feeds now**, decided exactly as the live path decides.
 No session starts and no rule is stored, and Jev is asked only with `--jev` (at most 10 questions, each a paid
-request; without it a Jev rule shows what it would need).
+request; without it a Jev rule shows what it would need). A rule with `jira.*` conditions shows the key found in
+the title and "would look up ABC-123"; `--jira` makes the real lookups (read-only, at most 20) and shows the
+status got, or the error.
 
 - `ccc autopilot test <id>` (or `project:<id>`, `global:<id>`; an id both levels have needs the level): the stored
   rule, still decided over all rules of both levels, so "another rule comes first" shows as the answer to "why does

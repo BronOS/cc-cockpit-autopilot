@@ -209,20 +209,24 @@ const jsonCopy = (v) => JSON.parse(JSON.stringify(v))
 // half-typed value is an inline error and never a silent change.
 
 const COND_OP_LABELS = Object.freeze({
-  is: 'is', isNot: 'is not', in: 'is one of', contains: 'contains', notContains: 'does not contain', startsWith: 'starts with',
+  is: 'is', isNot: 'is not', in: 'is one of', notIn: 'is none of', contains: 'contains', notContains: 'does not contain', startsWith: 'starts with',
   endsWith: 'ends with', has: 'has', hasNot: 'has not', hasPrefix: 'has one starting with', newerThan: 'newer than (minutes)', olderThan: 'older than (minutes)',
 })
 
 /** The table the editor offers, from the condition module: one table, no copy to drift. */
 function condTable() {
-  return { fields: COND.FIELDS, kinds: COND.KINDS, to: COND.TO, caps: { value: COND.MAX_VALUE, minutes: COND.MAX_MINUTES, in: COND.MAX_IN } }
+  return { fields: COND.FIELDS, kinds: COND.KINDS, to: COND.TO, categories: COND.CATEGORIES, caps: { value: COND.MAX_VALUE, minutes: COND.MAX_MINUTES, in: COND.MAX_IN } }
 }
+
+/** The ops that take a list of values (one per line). */
+const condIsList = (op) => op === 'in' || op === 'notIn'
 
 /** The value a field's kind starts with. */
 function condDefaultValue(kind) {
   switch (kind) {
     case 'kind': return 'chat'
     case 'to': return 'direct'
+    case 'category': return 'done'
     case 'bool':
     case 'read': return true
     case 'minutes': return 60
@@ -240,7 +244,7 @@ function condDefault(table) {
 
 /** A value fitted to the op: `in` takes a list, every other op one value. */
 function condFit(value, op, kind) {
-  if (op === 'in') {
+  if (condIsList(op)) {
     if (Array.isArray(value)) return value
     return value === '' || value === undefined || value === null ? [] : [value]
   }
@@ -293,7 +297,7 @@ function condParse(text, kind, op) {
     if (kind === 'read') return s === 'null' ? null : s === 'true'
     return s
   }
-  if (op === 'in') return str(text).split('\n').map((s) => s.trim()).filter(Boolean).map(one)
+  if (condIsList(op)) return str(text).split('\n').map((s) => s.trim()).filter(Boolean).map(one)
   return one(str(text))
 }
 
@@ -301,12 +305,12 @@ function condParse(text, kind, op) {
 function condControl(cond, table) {
   const spec = table.fields[cond.field]
   const kind = spec ? spec.value : 'text'
-  const fixed = kind === 'kind' ? table.kinds : kind === 'to' ? table.to : null
-  if (fixed) return cond.op === 'in' ? { type: 'checks', options: fixed } : { type: 'select', options: fixed }
+  const fixed = kind === 'kind' ? table.kinds : kind === 'to' ? table.to : kind === 'category' ? table.categories : null
+  if (fixed) return condIsList(cond.op) ? { type: 'checks', options: fixed } : { type: 'select', options: fixed }
   if (kind === 'bool') return { type: 'select', options: ['true', 'false'] }
   if (kind === 'read') return { type: 'select', options: ['true', 'false', 'null'] }
   if (kind === 'minutes') return { type: 'number', min: 1, max: table.caps.minutes }
-  if (cond.op === 'in') return { type: 'lines', max: table.caps.value }
+  if (condIsList(cond.op)) return { type: 'lines', max: table.caps.value }
   return { type: 'text', max: table.caps.value }
 }
 

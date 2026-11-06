@@ -23,7 +23,7 @@
 //   `trace` step (`action`) the log and the dry run show; an update is step `update`, kept out of the
 //   log (every chat reply would add a line).
 
-const { holds, conditionText } = require('./conditions')
+const { holds, conditionText, actualText, isJira } = require('./conditions')
 const { ANY_SOURCE, inHours, hoursLabel } = require('./schema')
 
 const sourceHolds = (rule, pluginId) => rule.sources.includes(ANY_SOURCE) || rule.sources.includes(String(pluginId))
@@ -36,12 +36,34 @@ const sourceHolds = (rule, pluginId) => rule.sources.includes(ANY_SOURCE) || rul
 function matchRule(rule, pluginId, item, o = {}) {
   if (!sourceHolds(rule, pluginId)) return null
   const why = [rule.sources.includes(ANY_SOURCE) ? 'any source' : `source ${pluginId}`]
+  const jira = []
   const kind = (typeof o.kindOf === 'function' && o.kindOf(pluginId)) || 'other'
   const now = Number.isFinite(o.now) ? o.now : Date.now()
   // `source` from the registry's plugin id, never from the item's data (the store sets it the same way).
   const it = { ...item, source: pluginId }
   for (const c of rule.when) {
+    // The jira.* conditions need the looked-up issue: held back for `matchJira`, after the free ones.
+    if (isJira(c)) {
+      jira.push(c)
+      continue
+    }
     if (!holds(c, it, kind, now)) return null
+    why.push(conditionText(c))
+  }
+  return { why, jira }
+}
+
+/**
+ * The rule's jira.* conditions against a lookup answer `j` (lib/jira.js: `{ key, issue }`). `f` is
+ * matchRule's answer. `{ why }` (more lines for the reason) when they all hold, else `{ no }`: a line
+ * naming the first that did not, with what the issue had ("jira.status in In Progress, Backlog (was: Done)").
+ */
+function matchJira(f, pluginId, item, j, o = {}) {
+  const now = Number.isFinite(o.now) ? o.now : Date.now()
+  const it = { ...item, source: pluginId, jira: j.issue }
+  const why = [`issue ${j.key}${j.issue && j.issue.status ? ` is ${JSON.stringify(j.issue.status)}` : ''}`]
+  for (const c of f.jira) {
+    if (!holds(c, it, 'other', now)) return { no: `${conditionText(c)} does not hold (${j.key}: ${actualText(c, it, 'other', now)})` }
     why.push(conditionText(c))
   }
   return { why }
@@ -59,7 +81,8 @@ const actionIds = (item) => (Array.isArray(item && item.actions) ? item.actions.
  */
 function actBlock(rule, pluginId, item, isNew) {
   if (!rule.act) return null
-  if (typeof isNew === 'function' && !isNew(pluginId, item)) return { step: 'update', skip: `an act rule runs on new items only; this is a change of one (rev ${String(item.rev).slice(0, 60)})` }
+  // An act rule with onChange (0.4.0) runs on a changed item too: once per rev (the host's check).
+  if (!rule.onChange && typeof isNew === 'function' && !isNew(pluginId, item)) return { step: 'update', skip: `an act rule runs on new items only; this is a change of one (rev ${String(item.rev).slice(0, 60)})` }
   const ids = actionIds(item)
   if (!ids.includes(rule.act)) return { step: 'action', skip: `${rule.act} is not among the item's actions now (${ids.length ? ids.join(', ') : 'none'}): the rule does not hold, the next one may take the item` }
   return null
@@ -69,20 +92,25 @@ function actBlock(rule, pluginId, item, isNew) {
  * The decision for one item over `rules` in order. `o`: `kindOf(pluginId)`, `now` (ms),
  * `jevAnswer(rule, pluginId, item)` → `{ score } | { pending } | { unavailable }` (may queue a
  * request), `jevCached(rule, pluginId, item)` → `{ score } | null` (never a request), `isNew(pluginId,
- * item)` → boolean (an act rule's trigger; absent: every item is new).
+ * item)` → boolean (an act rule's trigger; absent: every item is new), `jira(pluginId, item)` →
+ * `{ key, issue } | { key, no } | { key, pending } | { key, retry }` (may start a lookup; absent: no
+ * provider), `jiraCached` → the same or null (never a lookup), `fired(rule, pluginId, item)` → boolean
+ * (the rule already ran on this rev: its jira lookup is skipped, the host's once-per-rev check follows).
  *
  * Answers `{ decision, rule, why, score?, reason?, also, trace }`:
  * - `fire`: `rule` holds (`score` when it has a Jev part); `also` lists `{ rule, why, score? }`.
- * - `wait`: `rule`'s Jev answer is pending; decide again when it comes (lib/jev.js `onAnswer`).
- * - `retry`: `rule`'s Jev is unavailable (`reason`); decide again in 10 minutes.
+ * - `wait`: `rule`'s Jev answer (or Jira lookup, `waitFor: 'jira'` with its `jiraKey`) is pending; decide again when it comes.
+ * - `retry`: `rule`'s Jev is unavailable, or its Jira lookup failed for a reason that may pass (`reason`,
+ *   `waitFor`); decide again in 10 minutes.
  * - `none`: no rule holds (`rule` null).
- * `trace` lists `{ rule, step: 'off' | 'hours' | 'update' | 'action' | 'jev', why, score?, skip }` for the rules before the
+ * `trace` lists `{ rule, step: 'off' | 'hours' | 'update' | 'action' | 'jira' | 'jev', why, score?, skip }` for the rules before the
  * decision that matched on fields but did not hold.
  */
 function evaluate(rules, pluginId, item, o = {}) {
   const m = { kindOf: o.kindOf, now: Number.isFinite(o.now) ? o.now : Date.now() }
   const jevAnswer = o.jevAnswer || (() => ({ unavailable: 'jev unavailable' }))
   const jevCached = o.jevCached || (() => null)
+  const jiraAnswer = o.jira || (() => ({ key: null, no: 'no enabled plugin provides the jira service in this project (bronos.jira)' }))
   const trace = []
   for (let i = 0; i < rules.length; i++) {
     const rule = rules[i]
@@ -104,35 +132,56 @@ function evaluate(rules, pluginId, item, o = {}) {
       trace.push({ rule, ...blocked, why: f.why })
       continue
     }
+    let why = f.why
+    if (f.jira.length && !(typeof o.fired === 'function' && o.fired(rule, pluginId, item))) {
+      const j = jiraAnswer(pluginId, item) || { key: null, no: 'no answer' }
+      if (j.pending) return { decision: 'wait', waitFor: 'jira', jiraKey: j.key, rule, why: [...why, `title names ${j.key}`], also: [], trace }
+      if (j.retry) return { decision: 'retry', waitFor: 'jira', jiraKey: j.key, rule, why: [...why, `title names ${j.key}`], reason: `jira lookup of ${j.key} failed: ${j.retry}`, also: [], trace }
+      const jm = j.no ? { no: j.no } : matchJira(f, pluginId, item, j, m)
+      if (jm.no) {
+        trace.push({ rule, step: 'jira', why, skip: j.no ? `${/^jira[: ]/i.test(j.no) ? '' : 'jira: '}${j.no}: the rule does not hold, the next one may take the item` : `jira: ${jm.no}` })
+        continue
+      }
+      why = [...why, ...jm.why]
+    }
     let score
     if (rule.jev) {
       const a = jevAnswer(rule, pluginId, item) || {}
-      if (a.pending) return { decision: 'wait', rule, why: f.why, also: [], trace }
-      if (!isScore(a.score)) return { decision: 'retry', rule, why: f.why, reason: String(a.unavailable || 'jev unavailable'), also: [], trace }
+      if (a.pending) return { decision: 'wait', rule, why, also: [], trace }
+      if (!isScore(a.score)) return { decision: 'retry', rule, why, reason: String(a.unavailable || 'jev unavailable'), also: [], trace }
       score = a.score
       if (score < rule.jev.min) {
-        trace.push({ rule, step: 'jev', why: f.why, score, skip: `jev ${score.toFixed(2)} is below ${rule.jev.min}` })
+        trace.push({ rule, step: 'jev', why, score, skip: `jev ${score.toFixed(2)} is below ${rule.jev.min}` })
         continue
       }
     }
-    const also = alsoMatched(rules.slice(i + 1), pluginId, item, m, jevCached, o.isNew)
-    return { decision: 'fire', rule, why: f.why, ...(score !== undefined ? { score } : {}), also, trace }
+    const also = alsoMatched(rules.slice(i + 1), pluginId, item, m, jevCached, o.isNew, o.jiraCached)
+    return { decision: 'fire', rule, why, ...(score !== undefined ? { score } : {}), also, trace }
   }
   return { decision: 'none', rule: null, why: [], also: [], trace }
 }
 
 /** The rules after the winner that hold on fields and cached answers alone (a Jev rule with no cached answer is left out). */
-function alsoMatched(rest, pluginId, item, m, jevCached, isNew) {
+function alsoMatched(rest, pluginId, item, m, jevCached, isNew, jiraCached) {
   const out = []
   for (const rule of rest) {
     if (!rule.enabled || !sourceHolds(rule, pluginId) || !inHours(rule.hours, m.now)) continue
     const f = matchRule(rule, pluginId, item, m)
     if (!f || actBlock(rule, pluginId, item, isNew)) continue
+    // A jira.* rule counts only on a lookup already made (no request for a log line).
+    let why = f.why
+    if (f.jira.length) {
+      const j = typeof jiraCached === 'function' ? jiraCached(pluginId, item) : null
+      if (!j || !j.issue) continue
+      const jm = matchJira(f, pluginId, item, j, m)
+      if (jm.no) continue
+      why = [...why, ...jm.why]
+    }
     if (rule.jev) {
       const c = jevCached(rule, pluginId, item)
       if (!c || !isScore(c.score) || c.score < rule.jev.min) continue
-      out.push({ rule, why: f.why, score: c.score })
-    } else out.push({ rule, why: f.why })
+      out.push({ rule, why, score: c.score })
+    } else out.push({ rule, why })
   }
   return out
 }
@@ -156,4 +205,4 @@ function outsiderWarning(rule, kindOf) {
   return `outsiders can trigger this rule: ${mail.join(', ')} is mail, and anyone who can send you an email can ${what}`
 }
 
-module.exports = { matchRule, evaluate, outsiderWarning, actionIds, actBlock }
+module.exports = { matchRule, matchJira, evaluate, outsiderWarning, actionIds, actBlock }

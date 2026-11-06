@@ -15,9 +15,9 @@ test('parse: commands, defaults, and bad arguments', () => {
   assert.deepEqual(CLI.parse(['help']), { cmd: 'help' })
   assert.deepEqual(CLI.parse(['log']), { cmd: 'log', n: 20 })
   assert.deepEqual(CLI.parse(['log', '5']), { cmd: 'log', n: 5 })
-  assert.deepEqual(CLI.parse(['test']), { cmd: 'test', rule: null, jev: false })
-  assert.deepEqual(CLI.parse(['test', 'down', '--jev']), { cmd: 'test', rule: 'down', jev: true })
-  assert.deepEqual(CLI.parse(['test', '--jev']), { cmd: 'test', rule: null, jev: true })
+  assert.deepEqual(CLI.parse(['test']), { cmd: 'test', rule: null, jev: false, jira: false })
+  assert.deepEqual(CLI.parse(['test', 'down', '--jev']), { cmd: 'test', rule: 'down', jev: true, jira: false })
+  assert.deepEqual(CLI.parse(['test', '--jev']), { cmd: 'test', rule: null, jev: true, jira: false })
   assert.deepEqual(CLI.parse(['stop', 'r0123456789ab']), { cmd: 'stop', run: 'r0123456789ab' })
   for (const bad of [['stop'], ['stop', 'a', 'b'], ['stop', 'r 1'], ['stop', '$(x)'], ['stop', 'x'.repeat(65)], ['nope'], ['on', 'now'], ['log', '0'], ['log', '201'], ['log', 'x'], ['log', '1', '2'], ['test', 'a', 'b'], ['test', '--fast'], ['test', '--jev', '--jev'], ['status', 'x']]) {
     const p = CLI.parse(bad)
@@ -137,8 +137,8 @@ test('parse: rules, playbooks and test with JSON; bad arguments are usage errors
   assert.deepEqual(CLI.parse(['playbooks']), { cmd: 'playbooks', sub: 'list' })
   assert.deepEqual(CLI.parse(['playbooks', 'show', 'check']), { cmd: 'playbooks', sub: 'show', name: 'check' })
   assert.deepEqual(CLI.parse(['playbooks', 'set', 'check', '-']), { cmd: 'playbooks', sub: 'set', name: 'check', input: { stdin: true } })
-  assert.deepEqual(CLI.parse(['test', '-', '--at', '2']), { cmd: 'test', rule: null, jev: false, input: { stdin: true }, at: 2 })
-  assert.deepEqual(CLI.parse(['test', '{"id":"a"}', '--jev']), { cmd: 'test', rule: null, jev: true, input: { text: '{"id":"a"}' } })
+  assert.deepEqual(CLI.parse(['test', '-', '--at', '2']), { cmd: 'test', rule: null, jev: false, jira: false, input: { stdin: true }, at: 2 })
+  assert.deepEqual(CLI.parse(['test', '{"id":"a"}', '--jev']), { cmd: 'test', rule: null, jev: true, jira: false, input: { text: '{"id":"a"}' } })
   for (const bad of [['rules', 'frob'], ['rules', 'export', 'x'], ['rules', 'add'], ['rules', 'add', 'a', 'b'], ['rules', 'add', '{}', '--at'], ['rules', 'add', '{}', '--at', '0'], ['rules', 'add', '{}', '--at', 'x'], ['rules', 'set', '1'], ['rules', 'set', '-x', '{}'], ['rules', 'rm'], ['rules', 'rm', '-'], ['rules', 'move', 'a'], ['rules', 'move', 'a', '0'], ['rules', 'enable', 'a', 'b'], ['rules', 'rm', '1', '--at', '2'], ['playbooks', 'frob'], ['playbooks', 'show'], ['playbooks', 'show', '../x'], ['playbooks', 'show', 'a.b'], ['playbooks', 'set', 'a'], ['playbooks', 'rm', 'a/b'], ['playbooks', 'x'], ['test', '-', 'a'], ['test', 'a', '{}'], ['test', 'a', '--at', '1'], ['test', '-', '--at', 'x']]) {
     const p = CLI.parse(bad)
     assert.ok(p.error, bad.join(' '))
@@ -393,7 +393,7 @@ test('parse: --project / --global and level:id selectors; a clash or a doubled f
   assert.deepEqual(CLI.parse(['rules', 'enable', 'global:a']), { cmd: 'rules', sub: 'enable', level: 'global', sel: 'a' })
   assert.deepEqual(CLI.parse(['rules', 'set', 'project:2', '-']), { cmd: 'rules', sub: 'set', level: 'project', sel: '2', input: { stdin: true } })
   assert.deepEqual(CLI.parse(['playbooks', 'set', '--project', 'x', '-']), { cmd: 'playbooks', sub: 'set', level: 'project', name: 'x', input: { stdin: true } })
-  assert.deepEqual(CLI.parse(['test', '-', '--global', '--at', '2']), { cmd: 'test', rule: null, jev: false, level: 'global', input: { stdin: true }, at: 2 })
+  assert.deepEqual(CLI.parse(['test', '-', '--global', '--at', '2']), { cmd: 'test', rule: null, jev: false, jira: false, level: 'global', input: { stdin: true }, at: 2 })
   for (const bad of [['rules', '--project', '--global'], ['rules', '--global', '--global'], ['rules', 'enable', '--project', 'global:a'], ['rules', 'enable', 'other:a'], ['playbooks', 'rm', 'global:x'], ['log', '--global']]) {
     const p = CLI.parse(bad)
     assert.ok(p.error, bad.join(' '))

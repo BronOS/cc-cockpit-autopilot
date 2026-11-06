@@ -17,10 +17,11 @@ the item's own actions with no session (bronos.autopilot)
   ccc autopilot on                 switch on: items in the feeds now are the baseline, only new or changed ones fire
   ccc autopilot off                switch off: nothing fires (the dry run still works)
   ccc autopilot log [n]            the last n log entries (default ${LOG_DEFAULT}, at most ${LOG_MAX}), newest first
-  ccc autopilot test [rule|<json>|-] [--at <n>] [--jev] [--project|--global]
+  ccc autopilot test [rule|<json>|-] [--at <n>] [--jev] [--jira] [--project|--global]
                                    dry run: which current feed items each rule (or the one named, or the rule
                                    given as JSON and not stored) would fire on and why; no session is started,
-                                   and Jev is asked only with --jev
+                                   Jev is asked only with --jev, and the Jira
+                                   issue of a jira.* condition is looked up (read-only) only with --jira
   ccc autopilot reload             read both rules files and the playbooks again and list the problems
   ccc autopilot format             the rule and playbook format: every field, its type and limits, an example
   ccc autopilot rules [--project|--global]
@@ -74,7 +75,7 @@ level's ${S.RULES_FILE} as "rules" prints it; digits only is always a position, 
 Claude sessions start on their own: test it first. See the plugin's README.
 `
 
-const USAGE = 'Usage: ccc autopilot [status] | on | off | log [n] | test [rule|<json>|-] [--at <n>] [--jev] [--project|--global] | reload | format | rules [export|add|set|rm|move|enable|disable] [--project|--global] | playbooks [show|set|rm] [--project|--global] | base [show|set] [--project|--global] | stop <run> | help'
+const USAGE = 'Usage: ccc autopilot [status] | on | off | log [n] | test [rule|<json>|-] [--at <n>] [--jev] [--jira] [--project|--global] | reload | format | rules [export|add|set|rm|move|enable|disable] [--project|--global] | playbooks [show|set|rm] [--project|--global] | base [show|set] [--project|--global] | stop <run> | help'
 
 /** One line, no control characters (C0, DEL, C1, line and paragraph separators), cut to `max`. */
 function oneLine(s, max) {
@@ -269,6 +270,7 @@ function parse(argv) {
     if (f.error) return f
     let rule = null
     let jev = false
+    let jira = false
     let input = null
     let at = null
     for (let i = 0; i < f.rest.length; i++) {
@@ -276,6 +278,9 @@ function parse(argv) {
       if (a === '--jev') {
         if (jev) return usage('--jev given twice')
         jev = true
+      } else if (a === '--jira') {
+        if (jira) return usage('--jira given twice')
+        jira = true
       } else if (a === '--at') {
         if (at !== null) return usage('--at given twice')
         const n = placeOf(f.rest[++i])
@@ -285,7 +290,7 @@ function parse(argv) {
         // A rule id starts with a letter or a digit, so `{` and a lone `-` can only be the JSON input.
         if (rule !== null || input !== null) return usage('test takes one rule id or one JSON rule')
         input = a === '-' ? { stdin: true } : { text: a }
-      } else if (a.startsWith('-')) return usage(`unknown option "${oneLine(a, 40)}" (test takes --jev, --at, --project and --global)`)
+      } else if (a.startsWith('-')) return usage(`unknown option "${oneLine(a, 40)}" (test takes --jev, --jira, --at, --project and --global)`)
       else if (rule !== null || input !== null) return usage('test takes at most one rule id')
       else {
         // A stored rule as `down` or `project:down`; the flag and the prefix must agree.
@@ -296,7 +301,7 @@ function parse(argv) {
       }
     }
     if (at !== null && input === null) return usage('--at goes with a JSON rule: test <json|-> --at <n>')
-    return { cmd, rule, jev, ...(f.level ? { level: f.level } : {}), ...(input ? { input } : {}), ...(at !== null ? { at } : {}) }
+    return { cmd, rule, jev, jira, ...(f.level ? { level: f.level } : {}), ...(input ? { input } : {}), ...(at !== null ? { at } : {}) }
   }
   return usage(`unknown command "${oneLine(cmd, 40)}"`)
 }
@@ -378,7 +383,7 @@ function formatReload(s) {
 
 /** The dry run's answer (host dryRun). */
 function formatDry(d) {
-  const head = `Dry run over ${d.items} item${d.items === 1 ? '' : 's'} from ${d.sources} source${d.sources === 1 ? '' : 's'}, ${d.rules} rule${d.rules === 1 ? '' : 's'}${d.jev ? ', with Jev' : ' (Jev not asked: add --jev)'}. No session is started.`
+  const head = `Dry run over ${d.items} item${d.items === 1 ? '' : 's'} from ${d.sources} source${d.sources === 1 ? '' : 's'}, ${d.rules} rule${d.rules === 1 ? '' : 's'}${d.jev ? ', with Jev' : ' (Jev not asked: add --jev)'}${d.jira ? ', with Jira lookups' : d.jiraRules ? ' (Jira not looked up: add --jira)' : ''}. No session is started.`
   const out = [head]
   // A rule given as JSON (not stored): say where it stood and that it was tested as on.
   if (d.candidate) out.push(`Rule ${oneLine(d.candidate.id, 72)} is the JSON you gave, not stored: tested as on, ${d.candidate.replaced ? `in the place of the stored rule ${oneLine(d.candidate.id, 72)}` : `at position ${d.candidate.at} of its level's file`}.`)

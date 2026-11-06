@@ -20,7 +20,7 @@ test('sources first, then every condition must hold; case does not matter', () =
     when: [{ field: 'place.name', op: 'contains', value: 'alerts' }, { field: 'from.name', op: 'in', value: ['bob', 'ann example'] }, { field: 'title', op: 'contains', value: 'down' }],
   })
   const o = { kindOf, now: NOW }
-  assert.deepEqual(matchRule(r, 'bronos.chat', it(), o), { why: ['source bronos.chat', 'place.name contains alerts', 'from.name in bob, ann example', 'title contains down'] })
+  assert.deepEqual(matchRule(r, 'bronos.chat', it(), o), { why: ['source bronos.chat', 'place.name contains alerts', 'from.name in bob, ann example', 'title contains down'], jira: [] })
   assert.ok(matchRule(r, 'bronos.jira', it(), o), 'the second listed source')
   assert.equal(matchRule(r, 'bronos.gmail', it(), o), null, 'another source: the conditions are not even read')
   assert.equal(matchRule(r, 'bronos.chat', it({ where: 'Random' }), o), null)
@@ -37,7 +37,7 @@ test('["*"] is any source; the condition `source` and `sourceKind` read the plug
 
 test('an empty when is a sources-only rule: every item of the sources holds', () => {
   const r = one({ sources: ['bronos.jira'], when: [] })
-  assert.deepEqual(matchRule(r, 'bronos.jira', it()), { why: ['source bronos.jira'] })
+  assert.deepEqual(matchRule(r, 'bronos.jira', it()), { why: ['source bronos.jira'], jira: [] })
   assert.equal(matchRule(r, 'bronos.chat', it()), null)
 })
 

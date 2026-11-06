@@ -30,8 +30,8 @@ test('the manifest: id, api, entry points exist, the panel', () => {
   assert.equal(manifest.id, 'bronos.autopilot')
   assert.match(manifest.id, /^[a-z0-9]+(\.[a-z0-9-]+)+$/)
   assert.match(manifest.version, /^\d+\.\d+\.\d+$/)
-  // 0.3.0: act rules, mode and base.md (a bump the marketplace entry and the README follow).
-  assert.equal(manifest.version, '0.3.0')
+  // 0.4.0: the live Jira condition and onChange on act rules (a bump the marketplace entry and the README follow).
+  assert.equal(manifest.version, '0.4.0')
   assert.equal(manifest.api, 1)
   assert.equal(manifest.license, 'MIT')
   assert.equal(manifest.author, 'Oleg Bronzov')
@@ -66,8 +66,8 @@ test('contributes.cli: one command, summary and usage within the limits, usage s
   for (const sub of [...CLI.RULES_SUBS, ...CLI.PLAYBOOKS_SUBS]) if (sub !== 'list') assert.ok(cli.usage.includes(sub), sub)
 })
 
-test('services: uses inbox-feed and jev, collects inbox-feed (a subset of uses), provides nothing', () => {
-  assert.deepEqual(manifest.services, { uses: { 'inbox-feed': 2, jev: 1 }, collects: ['inbox-feed'] })
+test('services: uses inbox-feed, jev and jira (0.4.0), collects inbox-feed (a subset of uses), provides nothing', () => {
+  assert.deepEqual(manifest.services, { uses: { 'inbox-feed': 2, jev: 1, jira: 1 }, collects: ['inbox-feed'] })
   for (const name of manifest.services.collects) assert.ok(Object.hasOwn(manifest.services.uses, name), name)
   for (const name of Object.keys(manifest.services.uses)) assert.match(name, /^[a-z][a-z0-9-]{0,63}$/)
 })
@@ -126,7 +126,7 @@ test('example data only: addresses on example domains, the examples folder valid
     if (!fs.existsSync(file)) continue
     const src = fs.readFileSync(file, 'utf8')
     for (const m of src.matchAll(/[A-Za-z0-9._%+-]+@([A-Za-z0-9.-]+\.[A-Za-z]{2,})/g)) {
-      assert.match(m[1], /(^|\.)example\.(com|org)$|^anthropic\.com$|^gmail\.com$/, `${file}: ${m[0]}`)
+      assert.match(m[1], /(^|\.)example\.(com|org|atlassian\.net)$|^anthropic\.com$|^gmail\.com$/, `${file}: ${m[0]}`)
     }
   }
   const R = require('../dist/lib/rules')

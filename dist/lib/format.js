@@ -27,12 +27,12 @@ const FIELDS = [
   ['hours.from', 'string "HH:MM"', 'start of the window, inclusive'],
   ['hours.to', 'string "HH:MM"', 'end of the window, exclusive'],
   ['playbook', 'string', "a session rule: the playbook file playbooks/<name>.md of the rule's own level (a global rule never reads a project's playbooks/), named without \".md\". A rule has playbook or act, never both"],
-  ['act', 'string', `an act rule: one of the item's own actions that Autopilot runs itself, with no Claude session (markRead, markUnread, done, or an id the source offers); only on new items, and only when the item offers it then (else the next rule may take the item). Not ${S.ACT_REFUSED.map((a) => `"${a}"`).join(', ')}. An act rule has none of ${S.SESSION_KEYS.join(', ')}`],
+  ['act', 'string', `an act rule: one of the item's own actions that Autopilot runs itself, with no Claude session (markRead, markUnread, done, or an id the source offers); on new items (with onChange also on each new version of an item), and only when the item offers it then (else the next rule may take the item). Not ${S.ACT_REFUSED.map((a) => `"${a}"`).join(', ')}. An act rule has none of ${S.SESSION_KEYS.join(', ')}`],
   ['mode', S.MODE_LIST.join(' | '), `a session rule: ${S.MODE_DEFAULT} (the default) changes nothing; act may carry out only the actions its playbook lists under a "${S.ALLOWED_ACTIONS}" heading, on that item only (a playbook without that list makes the rule a problem)`],
   ['check', 'string', `a session rule, at most ${S.MAX_CHECK} characters: what the session checks first against the full item (it may name what only the item shows, a screenshot too); when it does not hold, the session says so in one line and stops. Left out: no check`],
   ['model', `${S.MODEL_LIST.join(' | ')}`, "a session rule: the session's model; left out: your default. Needs cc-cockpit 0.11, older apps ignore it"],
   ['effort', `${S.EFFORT_LIST.join(' | ')}`, "a session rule: the session's effort; left out: your default. Needs cc-cockpit 0.11, older apps ignore it"],
-  ['onChange', 'true | false', 'a session rule: default false (a rule fires once per item); true sends a newer version of the item (a reply, a comment, a status change) to the same session'],
+  ['onChange', 'true | false', 'default false (a rule fires once per item). A session rule: true sends a newer version of the item (a reply, a comment, a status change) to the same session. An act rule: true runs the action again on each new version (rev) of the item, judging its conditions, jira.* ones too, again; once per version (limits count actions)'],
   ['limits', 'object', 'per rule'],
   ['limits.perDay', 'whole number', `${range('perDay')} sessions (an act rule: actions that succeeded) in a rolling 24 hours; default ${S.LIMITS.perDay.default}, an act rule's ${S.LIMITS.perDay.actDefault}`],
   ['limits.cooldownMinutes', 'whole number', `${range('cooldownMinutes')} minutes between two sessions (actions) of this rule, 0 is no cooldown; default ${S.LIMITS.cooldownMinutes.default}, an act rule's ${S.LIMITS.cooldownMinutes.actDefault}`],
@@ -48,9 +48,24 @@ const conditionRows = () =>
       bool: 'true | false',
       read: 'true | false | null',
       minutes: `whole minutes, 1-${C.MAX_MINUTES}`,
+      category: C.CATEGORIES.join(' | '),
     }[value]
-    return [field, ops.join(' '), ops.includes('in') ? `${what}; for in: a list of 1-${C.MAX_IN} of them` : what]
+    return [field, ops.join(' '), ops.includes('in') ? `${what}; in, notIn: a list of 1-${C.MAX_IN}` : what]
   })
+
+/** An act rule with a live Jira condition (0.4.0): mail about an issue that moved on is marked read. Example data only. */
+const EXAMPLE_JIRA_RULE = Object.freeze({
+  id: 'jira-mail-mark-read',
+  enabled: false,
+  sources: ['bronos.gmail'],
+  when: [
+    { field: 'from.address', op: 'is', value: 'jira@example.atlassian.net' },
+    { field: 'title', op: 'startsWith', value: '[JIRA]' },
+    { field: 'jira.status', op: 'notIn', value: ['In Progress', 'Backlog'] },
+  ],
+  act: 'markRead',
+  onChange: true,
+})
 
 /** A rule that passes the loader (test/format.test.js checks it with readRules). Example data only. */
 const EXAMPLE_RULE = Object.freeze({
@@ -140,6 +155,22 @@ Conditions (the \`when\` list; the same format as the Inbox plugin's rules), eac
 ${condLines}
 Text compares case-insensitively; there are no regexes.
 
+The jira.* conditions (0.4.0) are about the Jira issue the item's title names, read live through the optional
+jira service of the bronos.jira plugin (without it they never hold, and \`ccc autopilot reload\` warns):
+  - Key: a key in parentheses wins ("[JIRA] (ABC-123) Summary"), else the first word shaped like ABC-123
+    ("[JIRA] Ann assigned OPS-5 to you"); a built-in pattern, never one from a rule. No key: false.
+  - When: only after sources, hours and every other condition of the rule held (and, for an act rule, the item
+    is new or has a new version and offers the action), so other mail costs no lookup. Once per version of the
+    item, shared by every rule that asks.
+  - Fresh: the answer is not older than the item (the lookup passes the item's age, 15 s to 5 min).
+  - An issue the service does not know or may not read, or no jira provider: the condition is false and the
+    next rule may take the item (logged, step jira). A busy or failing service (limits, network): not false:
+    the item waits like a Jev outage, no lower rule fires, and it is looked up again in 10 minutes, at most
+    4 tries, then the condition is false (logged).
+  - jira.done and jira.mine are true or false; jira.assignee is empty for an unassigned issue.
+  \`ccc autopilot test\` shows the key found and says "would look up"; add --jira to really make the (read-only)
+  lookups, at most 20.
+
 Order of checks for a rule: enabled, sources, hours, when, jev (cheapest first, so an item outside the
 hours costs no Jev request). Rules are tried in order (the project file, then the global one) and the
 first that holds is the item's rule. A rule with a bad value is a problem (shown in the panel and by
@@ -169,6 +200,10 @@ ${EXAMPLE_PLAYBOOK}
 An act-mode playbook adds the list (each action with its exact target; a value from the item only where
 the playbook says how):
 ${EXAMPLE_ALLOWED}
+
+Example act rule with a Jira condition (marks the mail read when the issue is not in progress or backlog,
+again whenever the thread gets a new message):
+${JSON.stringify(EXAMPLE_JIRA_RULE, null, 2)}
 
 Three kinds of rule, from least to most power:
   act rule          "act": one of the item's own actions (mark read, done): no Claude, so no outside
@@ -210,4 +245,4 @@ function askPrompt(folders) {
   return text
 }
 
-module.exports = { FIELDS, EXAMPLE_RULE, EXAMPLE_ACT_RULE, EXAMPLE_ALLOWED, EXAMPLE_PLAYBOOK, formatText, askPrompt }
+module.exports = { FIELDS, EXAMPLE_RULE, EXAMPLE_ACT_RULE, EXAMPLE_JIRA_RULE, EXAMPLE_ALLOWED, EXAMPLE_PLAYBOOK, formatText, askPrompt }
