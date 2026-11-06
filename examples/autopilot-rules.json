@@ -28,5 +28,32 @@
     "check": "The ticket (for example SUP-123) reports that people cannot log in to a website, and names the site.",
     "limits": { "perDay": 5, "cooldownMinutes": 60 },
     "onChange": false
+  },
+  {
+    "id": "site-down-log",
+    "name": "Site down: check and log",
+    "enabled": false,
+    "sources": ["bronos.chat"],
+    "when": [
+      { "field": "place.name", "op": "is", "value": "Alerts" },
+      { "field": "title", "op": "contains", "value": "down" }
+    ],
+    "playbook": "site-log",
+    "mode": "act",
+    "check": "The message reports that a website (a hostname such as shop.example.com) is down right now. Made-up names: change them to yours.",
+    "model": "sonnet",
+    "limits": { "perDay": 10, "cooldownMinutes": 30 }
+  },
+  {
+    "id": "done-mails-read",
+    "name": "Finished-issue mails read",
+    "enabled": false,
+    "sources": ["bronos.gmail"],
+    "when": [
+      { "field": "from.address", "op": "is", "value": "tracker@example.com" },
+      { "field": "title", "op": "contains", "value": "Done" }
+    ],
+    "act": "markRead",
+    "limits": { "perDay": 100, "cooldownMinutes": 0 }
   }
 ]

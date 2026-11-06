@@ -13,6 +13,10 @@
 //   read change (same `rev`) is not news. A key leaves `seen` on `gone` and when a full list no
 //   longer holds it, never by age or count: an evicted key would make a mere read change of an item
 //   still in the feed look new.
+// - New, not changed (0.3.0: an act rule fires on new items only). `born` maps an id to the rev it had
+//   when it first came in after the baseline; an item is new while its rev is still that one. Kept like
+//   `seen` (gone, a full list without it, a rebaseline) and capped per source, oldest out: an id that
+//   fell out only stops an act rule from firing on it, the cautious side.
 //
 // - A source is keyed by the `pluginId` the registry passes with every event and every provider
 //   entry, never by a field in the data: a provider cannot place items under another source. Each
@@ -31,7 +35,7 @@
 //   is counted on the source (`refused`, `overCap`), so a refusal shows on its line.
 // Nothing here throws on a hostile provider: a bad answer is a state on that source.
 
-const { CAPS, describeOf, featuresOf, itemOf, goneOf, syncOf } = require('./feed')
+const { CAPS, describeOf, featuresOf, itemOf, goneOf, syncOf, actReplyOf } = require('./feed')
 const { why, withTimeout } = require('./util')
 
 const CALL_MS = 10000
@@ -40,6 +44,8 @@ const CALL_MS = 10000
 // second snapshot is newer than every dropped event, so nothing is lost).
 const MAX_BUFFER = 2000
 const EVENTS = ['item', 'gone', 'sync']
+// The ids per source remembered as new (see the header): far more than one burst of new items.
+const MAX_BORN = 2000
 
 /**
  * The store over `set` (`ctx.services.useAll('inbox-feed')`). `opts`: `log` ({ warn }), `onChange(pluginId)`
@@ -90,6 +96,8 @@ function createSources(set, opts = {}) {
       items: new Map(),
       /** id -> last rev seen (see the header); `baselined` once a good read filled it */
       seen: new Map(),
+      /** id -> the rev it came in with after the baseline (see the header) */
+      born: new Map(),
       baselined: false,
       state: 'ok',
       message: null,
@@ -147,12 +155,19 @@ function createSources(set, opts = {}) {
     const fresh = []
     for (const it of items) {
       if (r.seen.get(it.id) === it.rev) continue
+      const known = r.seen.has(it.id)
       r.seen.set(it.id, it.rev)
-      if (r.baselined) fresh.push({ ...it, source: r.pluginId })
+      if (!r.baselined) continue
+      if (!known) {
+        r.born.set(it.id, it.rev)
+        if (r.born.size > MAX_BORN) r.born.delete(r.born.keys().next().value)
+      }
+      fresh.push({ ...it, source: r.pluginId })
     }
     if (full) {
       const ids = new Set(items.map((it) => it.id))
       for (const id of r.seen.keys()) if (!ids.has(id)) r.seen.delete(id)
+      for (const id of r.born.keys()) if (!ids.has(id)) r.born.delete(id)
     }
     return fresh
   }
@@ -199,6 +214,7 @@ function createSources(set, opts = {}) {
       for (const id of g.ids) {
         r.items.delete(id)
         r.seen.delete(id)
+        r.born.delete(id)
       }
       return []
     }
@@ -340,7 +356,31 @@ function createSources(set, opts = {}) {
     },
     sync,
     snapshot,
-    /** The handle to call `act` on, or null when the source is not in the set. */
+    /**
+     * Is the item new (0.3.0, an act rule's trigger): it came in after the baseline and still has the rev
+     * it came with? A changed item, one from the baseline, and one of a source not in the set are not.
+     */
+    isNew(pluginId, id, rev) {
+      const r = sources.get(pluginId)
+      return Boolean(r) && r.born.has(id) && r.born.get(id) === rev
+    },
+    /**
+     * Run one of an item's actions at its source (the inbox-feed v2 `act(id, action)`), within the call
+     * limit. Resolves `{ ok: true }` or `{ ok: false, message }`, never rejects: a source not in the set,
+     * a rejection, a late or unreadable answer are each a failure with the reason (the act rule's log
+     * line). The caller checked that `action` is in the item's current `actions`; the source checks again
+     * (the contract: the caller is another plugin).
+     */
+    async act(pluginId, id, action) {
+      const r = sources.get(pluginId)
+      if (!r || disposed) return { ok: false, message: `${pluginId} is no longer a source` }
+      try {
+        const reply = actReplyOf(await withTimeout(r.handle.act(id, action), callMs, `${r.desc.label} ${action}`, timers))
+        return reply.ok ? reply : { ok: false, message: reply.message || `${r.desc.label} refused ${action} without a reason` }
+      } catch (e) {
+        return { ok: false, message: why(e) }
+      }
+    },
     /**
      * The switch went on: what is listed now is the new baseline, so nothing that came in while
      * Autopilot was off fires. A source whose snapshot is still pending takes that snapshot as its
@@ -349,6 +389,7 @@ function createSources(set, opts = {}) {
     rebaseline() {
       for (const r of sources.values()) {
         r.seen = new Map([...r.items.values()].map((it) => [it.id, it.rev]))
+        r.born = new Map()
         if (r.pending) r.baselined = false
       }
     },
@@ -366,4 +407,4 @@ function createSources(set, opts = {}) {
   }
 }
 
-module.exports = { createSources, MAX_BUFFER }
+module.exports = { createSources, MAX_BUFFER, MAX_BORN }

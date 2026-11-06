@@ -46,7 +46,10 @@ const bare = (id, o = {}) => {
  * A fake `inbox-feed` v2 provider: `snapshot()` answers `{ items: feed.items, state }`. `feed.hold()`
  * makes the next snapshot wait until the returned `release()` is called, answering what `feed.items`
  * held when it was asked (a snapshot that resolves late, after newer events). `feed.throwOn` =
- * 'snapshot' | 'describe' makes that call reject. Calls are recorded.
+ * 'snapshot' | 'describe' | 'act' makes that call reject. `act(id, action)` (0.3.0's act rules) answers
+ * `feed.actResult` (default `{ ok: true }`; a function of `(id, action)` for one answer per call) and
+ * calls `feed.onAct(id, action)` first when set (a test looks at the claim while the act runs). Calls
+ * are recorded.
  */
 function fakeFeed(describe, items = []) {
   const feed = {
@@ -54,6 +57,8 @@ function fakeFeed(describe, items = []) {
     state: 'ok',
     calls: [],
     throwOn: null,
+    actResult: { ok: true },
+    onAct: null,
     held: null,
     hold() {
       let release
@@ -68,6 +73,12 @@ function fakeFeed(describe, items = []) {
       },
       async features() {
         return []
+      },
+      async act(id, action) {
+        feed.calls.push(['act', id, action])
+        if (feed.onAct) await feed.onAct(id, action)
+        if (feed.throwOn === 'act') throw new Error('act broke')
+        return typeof feed.actResult === 'function' ? feed.actResult(id, action) : feed.actResult
       },
       async snapshot() {
         feed.calls.push(['snapshot'])

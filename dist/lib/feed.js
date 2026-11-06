@@ -1,7 +1,8 @@
 'use strict'
 // What the `inbox-feed` v2 providers answer, checked and capped (bronos.inbox design-v2 "The feed
-// contract" and "The item"; copied from Inbox's lib/feed.js, adapted: Autopilot calls no feed action,
-// so `actReplyOf` is gone, and a rule never sees an `actions` entry it could press).
+// contract" and "The item"; copied from Inbox's lib/feed.js, adapted). Since 0.3.0 an act rule calls
+// one feed action (`act(id, action)`, only an id in the item's current `actions`), so `actReplyOf` is
+// back, as Inbox has it.
 // Every provider is another plugin, so its answers are untrusted input: a value of the
 // wrong type is dropped (or the whole answer turns into a source error), strings are cut, arrays
 // capped, unknown fields left out, and nothing here ever throws on a hostile answer. The panel
@@ -188,6 +189,17 @@ function goneOf(raw) {
 }
 
 /**
+ * An `act(id, action)` answer: `{ ok: true }` or `{ ok: false, message? }` (the message cut to one line of
+ * 300). Anything else is a failure: an act rule counts against its limits only on a real `ok: true`.
+ */
+function actReplyOf(raw) {
+  if (!isObj(raw) || typeof own(raw, 'ok') !== 'boolean') return { ok: false, message: 'the source answered something Autopilot cannot read' }
+  if (own(raw, 'ok')) return { ok: true }
+  const message = line(own(raw, 'message'), CAPS.message)
+  return { ok: false, ...(message ? { message } : {}) }
+}
+
+/**
  * `features()`'s answer as a set of plain one-line strings (feed v2 defines no names, so later additions
  * pass through): each at most 40 characters, at most 32 of them.
  */
@@ -202,4 +214,4 @@ function featuresOf(raw) {
   return out
 }
 
-module.exports = { CAPS, text, describeOf, itemOf, syncOf, goneOf, featuresOf }
+module.exports = { CAPS, text, describeOf, itemOf, syncOf, goneOf, actReplyOf, featuresOf }

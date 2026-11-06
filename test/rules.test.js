@@ -63,7 +63,7 @@ test('every field: valid and invalid values (a bad rule is a problem naming it a
     [rule('a', { hours: { from: '07:00', to: '07:00' } }), /hours.from and hours.to are the same/],
     [rule('a', { playbook: '../../.ssh/id_rsa' }), /playbook must be a file name/],
     [rule('a', { playbook: 'a.md' }), /playbook must be a file name/],
-    [rule('a', { playbook: undefined }), /playbook must be a file name/],
+    [rule('a', { playbook: undefined }), /playbook is missing: name a playbook .* or an act/],
     [rule('a', { check: 7 }), /check must be text/],
     [rule('a', { check: 'c'.repeat(501) }), /check is over 500/],
     [rule('a', { model: 'gpt' }), /model must be one of haiku, sonnet, opus, fable/],
@@ -296,4 +296,87 @@ test('summaryOf: one line with the sources, the conditions, Jev, the playbook, m
   assert.equal(R.summaryOf(r), 'bronos.jira, place.name is Support and title contains down, Jev ≥ 0.7 · playbook check (opus low) · 10/day, 30 min cooldown, again on change')
   const [any] = R.readRules([rule('b', { when: [] })]).rules
   assert.equal(R.summaryOf(any), 'any source, every new item · playbook check · 10/day, 30 min cooldown')
+})
+
+// ---- 0.3.0: act rules, the session mode, base.md ----
+
+const actRaw = (o = {}) => ({ id: 'read', sources: ['bronos.gmail'], when: [{ field: 'title', op: 'contains', value: 'Done' }], act: 'markRead', ...o })
+
+test('act or playbook: exactly one; act is an action id and never open', () => {
+  const err = (raw) => S.checkRule(raw).errors.map((e) => `${e.field}: ${e.message}`)
+  const ok = S.checkRule(actRaw())
+  assert.deepEqual(ok.errors, [])
+  assert.deepEqual([ok.rule.act, ok.rule.playbook, ok.rule.mode, ok.rule.check, ok.rule.model, ok.rule.effort, ok.rule.onChange], ['markRead', null, null, null, null, null, false])
+  assert.match(err(actRaw({ playbook: 'check' }))[0], /^playbook: playbook and act are both set: a rule either opens a session/)
+  const { act, ...neither } = actRaw()
+  assert.match(err(neither)[0], /^playbook: playbook is missing: name a playbook .* or an act/)
+  assert.match(err(actRaw({ act: 'open' }))[0], /^act: act cannot be "open": it opens a window for a person/)
+  for (const bad of ['', 'Mark', 'mark read', '1x', 'x'.repeat(41), 5, null, ['markRead']]) assert.match(err(actRaw({ act: bad }))[0], /^act: act must be an action id/, JSON.stringify(bad))
+  for (const good of ['markRead', 'markUnread', 'done', 'star', 'add-label']) assert.deepEqual(err(actRaw({ act: good })), [], good)
+})
+
+test('an act rule refuses every session key, each under its own field; a session rule takes mode', () => {
+  const e = S.checkRule(actRaw({ mode: 'investigate', check: 'x', model: 'sonnet', effort: 'low', onChange: false })).errors
+  assert.deepEqual(e.map((x) => x.field), ['mode', 'check', 'model', 'effort', 'onChange'])
+  for (const x of e) assert.match(x.message, /is for a session rule: an act rule runs "markRead" itself and opens no session/)
+  // jev, hours, limits and the rest are an act rule's as any rule's.
+  assert.deepEqual(S.checkRule(actRaw({ jev: { question: 'Done?' }, hours: { from: '08:00', to: '18:00' }, limits: { perDay: 100, cooldownMinutes: 0 }, name: 'n', enabled: false })).errors, [])
+  for (const m of S.MODE_LIST) assert.equal(S.checkRule(rule('a', { mode: m })).rule.mode, m)
+  assert.equal(S.checkRule(rule('a')).rule.mode, 'investigate', 'no mode is investigate')
+  for (const bad of ['Act', 'bypass', '', true]) assert.match(S.checkRule(rule('a', { mode: bad })).errors[0].message, /^mode must be one of investigate, act/)
+  // In a file: an invalid act rule is a problem and skipped, the others keep working.
+  const { rules, problems } = R.readRules([actRaw({ check: 'x' }), rule('good')])
+  assert.deepEqual(rules.map((r) => r.id), ['good'])
+  assert.match(problems[0], /^rule 1 \("read"\): check is for a session rule/)
+})
+
+test('canonicalRule: an act rule is written with act and no session key; mode only when it is act', () => {
+  assert.deepEqual(Object.keys(S.canonicalRule({ ...actRaw(), check: 'stale', model: 'sonnet', onChange: true, mode: 'act' }, null)), ['id', 'enabled', 'sources', 'when', 'act', 'limits'])
+  assert.equal(Object.hasOwn(S.canonicalRule({ ...rule('a'), mode: 'investigate' }, null), 'mode'), false, 'the default stays out of the file')
+  const actMode = S.canonicalRule({ ...rule('a'), mode: 'act' }, null)
+  assert.deepEqual(Object.keys(actMode).slice(0, 7), ['id', 'enabled', 'sources', 'when', 'playbook', 'mode', 'check'])
+  assert.deepEqual(S.checkRule(actMode).errors, [])
+})
+
+test('hasAllowedActions: the heading at any level and case, with a list item before the next heading', () => {
+  const yes = ['## Allowed actions\n- one', '# x\n\n### allowed ACTIONS:\n\n1. one', '## Allowed actions\n\n  * one\n## Next', '#### Allowed actions ##\n+ one']
+  const no = ['', '- one', 'Allowed actions\n- one', '## Allowed actions\n', '## Allowed actions\nSome text.\n', '## Allowed actions\n<!-- - one -->', '## Allowed actions\n## Next\n- one', '## Allowed actions and more\n- one', '##Allowed actions\n- one', '## Allowed actions\n-one']
+  for (const b of yes) assert.equal(S.hasAllowedActions(b), true, b)
+  for (const b of no) assert.equal(S.hasAllowedActions(b), false, b)
+})
+
+test('loadFolder: an act rule needs no playbook; act mode without "Allowed actions" is a problem; base.md is read', async () => {
+  const dir = tempFolder([actRaw(), rule('look', { mode: 'act', playbook: 'plain' }), rule('fix', { mode: 'act', playbook: 'listed' })], { plain: '# Plain\nLook.', listed: '# Listed\n\n## Allowed actions\n\n- Append one line to ~/notes/x.md.' })
+  try {
+    require('node:fs').writeFileSync(path.join(dir, 'base.md'), '\ufeffReport briefly.\r\n')
+    const got = await R.loadFolder(dir, fsp, 'project')
+    assert.deepEqual(got.rules.map((r) => r.ref), ['project:read', 'project:fix'])
+    assert.deepEqual(got.problems, ['rule "look": mode "act" needs an "Allowed actions" section in playbooks/plain.md (a heading "## Allowed actions" with the actions listed under it as a Markdown list): the session may do only what is listed there; skipped'])
+    assert.equal(got.entries[1].rule, null)
+    assert.match(got.entries[1].problem, /^mode "act" needs/)
+    assert.deepEqual(got.base, { text: 'Report briefly.', size: 20 })
+    assert.equal(got.baseProblem, null)
+    assert.equal(got.playbooks.has('plain'), true)
+    // Empty: none. Over the cap or not a file: a problem line and no text.
+    require('node:fs').writeFileSync(path.join(dir, 'base.md'), '  \n')
+    assert.equal((await R.loadFolder(dir, fsp)).base, null)
+    require('node:fs').writeFileSync(path.join(dir, 'base.md'), 'x'.repeat(S.MAX_BASE_BYTES + 1))
+    const big = await R.loadFolder(dir, fsp)
+    assert.deepEqual([big.base, big.baseProblem], [null, 'base.md: over 16 KiB'])
+    assert.ok(big.problems.includes('base.md: over 16 KiB; no session opens until it is fixed'))
+    require('node:fs').rmSync(path.join(dir, 'base.md'))
+    require('node:fs').mkdirSync(path.join(dir, 'base.md'))
+    assert.equal((await R.loadFolder(dir, fsp)).baseProblem, 'base.md: not a file')
+    // A missing folder has no base.md and no extra problem.
+    const gone = await R.loadFolder(path.join(dir, 'nope'), fsp)
+    assert.deepEqual([gone.base, gone.baseProblem, gone.problems.length], [null, null, 1])
+  } finally {
+    removeFolder(dir)
+  }
+})
+
+test('summaryOf: an act rule names its action, an act-mode rule says so', () => {
+  const a = { ...S.checkRule(actRaw({ limits: { perDay: 100, cooldownMinutes: 0 } })).rule }
+  assert.equal(R.summaryOf(a), 'bronos.gmail, title contains Done · runs markRead on new items (no session) · 100/day')
+  assert.equal(R.summaryOf(S.checkRule(rule('a', { mode: 'act', model: 'sonnet' })).rule), 'any source, title contains down · playbook check (act mode sonnet) · 10/day, 30 min cooldown')
 })

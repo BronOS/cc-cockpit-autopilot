@@ -50,6 +50,15 @@
 // global ones; the first that holds wins. A rule is named `<level>:<id>` (its `ref`) in the log, the
 // runs, the fired and limit records and the prompt frame, since an id is unique per level only. Every
 // edit names its level; a playbook resolves in its rule's own level.
+//
+// 0.3.0 (design-v2 "Autopilot 0.3.0"): an ACT rule runs one of the item's own feed actions (markRead,
+// done, ...) through the same inbox-feed service the items come from: no tab, no prompt, no Claude, so
+// outside text reaches no model and there is nothing to inject into. It fires on new items only, needs
+// the action in the item's current `actions` (else it is a non-match and the next rule may take the
+// item), goes through the limits and the app-wide claim like a session rule, holds the claim only while
+// the action runs, and counts against its limits only when the source says ok. A session rule has a
+// `mode` (investigate, or act: the playbook's "Allowed actions" only), and every session prompt carries
+// the person's base.md (both levels) after the fixed frame, before the fenced item (lib/prompt.js).
 
 const crypto = require('node:crypto')
 const os = require('node:os')
@@ -205,7 +214,9 @@ function createAutopilot(ctx, opts = {}) {
    * What evaluate needs besides the rules and the item: the provider's kind, the clock and the Jev
    * answers. `jevAnswer` may queue a request (the live path); the dry run passes its own.
    */
-  const evalOpts = (jevAnswer) => ({ kindOf, now: now(), jevAnswer, jevCached: jev.cached })
+  // `live`: the item's newness from the store (an act rule fires on new items only); the dry run leaves
+  // it out, so every current item is judged as if it had just come in (its question is "would it fire").
+  const evalOpts = (jevAnswer, live = false) => ({ kindOf, now: now(), jevAnswer, jevCached: jev.cached, ...(live ? { isNew: (pluginId, it) => store.isNew(pluginId, it.id, it.rev) } : {}) })
   const kindOf = (pluginId) => {
     const s = store.get(pluginId)
     return s ? s.desc.kind : null
@@ -352,6 +363,7 @@ function createAutopilot(ctx, opts = {}) {
    * that also matched (design-v2: logged, never run).
    */
   async function tryRule(ev, pluginId, it) {
+    if (ev.rule.act) return tryAct(ev, pluginId, it)
     const { rule, score } = ev
     const base = itemOfEntry(rule, { pluginId }, it)
     const step = rule.jev ? 'jev' : 'rule'
@@ -371,6 +383,15 @@ function createAutopilot(ctx, opts = {}) {
     if (!pb) {
       await dequeue(pluginId, it.id)
       await log({ at: t, ...base, step: 'open', ...also, skip: `playbook ${rule.playbook} not loaded (${rule.level} folder)` })
+      return false
+    }
+    // A base.md that is there but cannot be used opens no session (rules.js readBase): the person's
+    // standing instructions may be the very limits they count on, so a session without them is not
+    // the session they set up. Not queued either; the next news after the fix is decided again.
+    const baseBad = S.LEVELS.map((l) => levelOf(l)).find((l) => l && l.baseProblem)
+    if (baseBad) {
+      await dequeue(pluginId, it.id)
+      await log({ at: t, ...base, step: 'open', ...also, skip: `the ${baseBad.level} ${S.BASE_FILE} cannot be used (${baseBad.baseProblem}); no session opens until it is fixed` })
       return false
     }
     // The app-wide claim before the cap: a window that loses neither opens nor queues the item, so
@@ -412,7 +433,7 @@ function createAutopilot(ctx, opts = {}) {
     runs.unqueue(pluginId, it.id)
     let prompt
     try {
-      prompt = buildPrompt({ rule, pluginId, item: it, playbook: pb.body, marker: newMarker(randomBytes), runId })
+      prompt = buildPrompt({ rule, pluginId, item: it, playbook: pb.body, base: baseTexts(), marker: newMarker(randomBytes), runId })
     } catch (e) {
       await releaseClaim(pluginId, it.id)
       await log({ at: t, ...base, step: 'open', skip: why(e) })
@@ -426,7 +447,7 @@ function createAutopilot(ctx, opts = {}) {
       // 0.11 drops them silently; the rule then shows MODEL_NOTE once a Claude tab tells (warningsOf).
       const r = await ctx.sessions.open({ cwd: ctx.projectDir, prompt, ...(rule.model ? { model: rule.model } : {}), ...(rule.effort ? { effort: rule.effort } : {}) })
       tabId = r && typeof r.tabId === 'string' ? r.tabId : '?'
-      await runs.record({ source: pluginId, itemId: it.id, tabId, rule: rule.ref, rev: it.rev, openedAt: t, runId }).catch(warn('runs'))
+      await runs.record({ source: pluginId, itemId: it.id, tabId, rule: rule.ref, rev: it.rev, openedAt: t, runId, mode: rule.mode === 'act' ? 'act' : 'investigate' }).catch(warn('runs'))
     } catch (e) {
       // The app's own limit (5 a minute), a window closing, a refused prompt, a model the app refused.
       // No tab: the claim goes too, so another window (or this one, on the next rev) may open it.
@@ -441,6 +462,72 @@ function createAutopilot(ctx, opts = {}) {
     await log({ at: t, ...base, step, ...scored, ...also, tabId, runId })
     // Not awaited: notify resolves when shown, and judging must not wait for it.
     ctx.notify(`Autopilot: ${rule.ref} for ${CLI.oneLine(it.title, 200)}`, { title: 'Autopilot' }).catch(warn('notify'))
+    return true
+  }
+
+  /** The levels' base.md texts for a prompt: global first, then project (design-v2 "base.md"). */
+  const baseTexts = () => ['global', 'project'].map((l) => levelOf(l)).filter((l) => l && l.base).map((l) => ({ level: l.level, text: l.base.text }))
+
+  /** What the log says an action did: "marked read: <title>" for the well-known ids, else "ran <label>". */
+  function actDone(action, it) {
+    const known = { markRead: 'marked read', markUnread: 'marked unread', done: 'marked done at the source' }
+    const a = (it.actions || []).find((x) => x.id === action)
+    const what = known[action] || `ran ${CLI.oneLine(a ? a.label : action, 40)} (${action})`
+    return `${what}: ${text(it.title, 200) || it.id}`
+  }
+
+  /**
+   * An act rule fired (`ev`, decision `fire`; evaluate checked that the item is new and that the action
+   * is among its actions now): the limits, the app-wide claim (so two windows never both act, and an
+   * item another window has a session on is left to it), the source's `act`, the release, the log.
+   * Counted against the limits (and marked fired) only when the source answered ok; a failure is
+   * logged with the source's own message and does not hand the item to a lower rule (the rule did hold).
+   * No cap, no queue (no tab holds a slot) and no notification (a rule that marks mail read exists so
+   * the person is not interrupted by that mail). Resolves true when the action ran.
+   */
+  async function tryAct(ev, pluginId, it) {
+    const { rule, score } = ev
+    const base = { ...itemOfEntry(rule, { pluginId }, it), act: rule.act }
+    const scored = score !== undefined ? { score } : {}
+    const also = ev.also.length ? { also: ev.also.map((a) => a.rule.ref) } : {}
+    if (!state.enabled() || disposed) return false
+    // Decided by this rule now: a queue entry an earlier session rule left goes (its claim with it, below).
+    runs.unqueue(pluginId, it.id)
+    const t = now()
+    const limit = state.limitReason(rule, t)
+    if (limit) {
+      await releaseClaim(pluginId, it.id)
+      await log({ at: t, ...base, step: 'limit', ...scored, ...also, skip: limit })
+      return false
+    }
+    const runId = newRunId(randomBytes)
+    let won
+    try {
+      won = await claims.claim({ source: pluginId, itemId: it.id, runId, rule: rule.ref })
+    } catch (e) {
+      await log({ at: t, ...base, step: 'claim', ...also, skip: `the app-wide claim failed: ${why(e)}; ${rule.act} not run` })
+      return false
+    }
+    if (!won.ok) {
+      const o = won.owner
+      const who = o ? ` (${CLI.oneLine(o.project, 200)}, ${CLI.oneLine(o.rule, 80) || 'a rule'})` : ''
+      await log({ at: t, ...base, step: 'claim', ...also, skip: `held by another window${who}: ${rule.act} not run here` })
+      return false
+    }
+    let reply
+    try {
+      reply = await store.act(pluginId, it.id, rule.act)
+    } finally {
+      // Held only while the action runs: nothing of this item stays in flight afterwards.
+      await releaseClaim(pluginId, it.id)
+    }
+    if (!reply.ok) {
+      await log({ at: now(), ...base, step: 'act', ...scored, ...also, skip: `${rule.act} failed: ${CLI.oneLine(reply.message || 'the source refused it', 300)}` })
+      return false
+    }
+    await state.markFired(rule.ref, pluginId, it.id, it.rev, t).catch(warn('state'))
+    await state.recordOpen(rule.ref, t, 'act').catch(warn('state'))
+    await log({ at: t, ...base, step: 'act', ...scored, ...also, outcome: actDone(rule.act, it) })
     return true
   }
 
@@ -465,7 +552,7 @@ function createAutopilot(ctx, opts = {}) {
       await onRunUpdate(run, pluginId, it)
       return
     }
-    const ev = evaluate(loaded.rules, pluginId, it, evalOpts(jev.answer))
+    const ev = evaluate(loaded.rules, pluginId, it, evalOpts(jev.answer, true))
     if (ev.decision === 'wait') {
       // Held: lower rules do not fire meanwhile. Not logged (the answer comes within 45 s, or a
       // retry is logged then).
@@ -480,11 +567,17 @@ function createAutopilot(ctx, opts = {}) {
     waiting.delete(key)
     // Anything but a fire takes a queued item out (it no longer holds, or is decided by a lower rule).
     if (ev.decision !== 'fire') await dequeue(pluginId, it.id)
+    // An act rule above the deciding one whose action the item does not offer (design: "skip the rule,
+    // log why, fall through"): its line, since the person asks "why did my rule not run".
+    if (ev.decision === 'fire') {
+      for (const tr of ev.trace) if (tr.step === 'action') await log({ at: now(), ...itemOfEntry(tr.rule, { pluginId }, it), step: 'action', skip: tr.skip })
+    }
     if (ev.decision === 'none') {
       // What a person would ask about ("why did my rule not fire?"): a rule that matched on fields but
       // was outside its hours or under its Jev threshold. An off rule is not logged (the person turned it off).
       for (const tr of ev.trace) {
-        if (tr.step === 'off') continue
+        // An update past an act rule is no news to the person (every chat reply would be a line).
+        if (tr.step === 'off' || tr.step === 'update') continue
         await log({ at: now(), ...itemOfEntry(tr.rule, { pluginId }, it), step: tr.step, ...(tr.score !== undefined ? { score: tr.score } : {}), skip: tr.skip })
       }
       return
@@ -583,7 +676,7 @@ function createAutopilot(ctx, opts = {}) {
       if (support !== 'yes' || !tab || tab.typed !== false || tab.status !== 'waiting') continue
       let body
       try {
-        body = deliveryText(it, it.rev, rec.runId, { randomBytes, pluginId: p.source })
+        body = deliveryText(it, it.rev, rec.runId, { randomBytes, pluginId: p.source, mode: rec.mode })
       } catch (e) {
         await drop(`update rev ${revText(it.rev)} dropped: ${why(e)}`)
         continue
@@ -862,11 +955,13 @@ function createAutopilot(ctx, opts = {}) {
         const jv = ev.score !== undefined ? `jev ${ev.score.toFixed(2)}, ` : ''
         // The item's tab exists (lib/runs.js): the live path never opens a second one.
         const run = runs.runOf(pluginId, it.id)
+        // An act rule (lib/match.js checked its action is offered): it would run that, with no session.
+        const would = r.act ? `would run ${r.act} on the item (no session)` : 'it would open a session'
         if (run) add(row(r, ev.why, false, run.kind === 'tab' ? `its tab ${run.record.tabId} is open (rule ${run.record.rule}): no second session` : 'its tab is opening: no second session', ev.score))
         else if (rec && (!r.onChange || rec.rev === it.rev)) add(row(r, ev.why, false, `already fired on this item (${CLI.when(rec.at)})`, ev.score))
         else {
           const limit = state.limitReason(r, t)
-          add(row(r, ev.why, !limit, limit ? `limit: ${limit}` : `${jv}it would open a session`, ev.score))
+          add(row(r, ev.why, !limit, limit ? `limit: ${limit}` : `${jv}${would}`, ev.score))
         }
         // In file order: the also-matched ones with their score; what is left is a Jev rule with no
         // cached yes (no answer yet, or one under its `min`).
@@ -923,7 +1018,7 @@ function createAutopilot(ctx, opts = {}) {
   function levelStatus(level) {
     const lv = levelOf(level)
     const base = { level, label: S.LEVEL_LABELS[level], setting: level === 'global' ? 'globalFolder' : 'projectFolder' }
-    if (!lv) return { ...base, folder: null, folderPath: null, folderState: 'off', editable: false, rulesHash: null, entries: [], playbookFiles: [], hint: null }
+    if (!lv) return { ...base, folder: null, folderPath: null, folderState: 'off', editable: false, rulesHash: null, entries: [], playbookFiles: [], hint: null, base: null, baseProblem: null }
     return {
       ...base,
       folder: R.displayPath(lv.folder, home),
@@ -948,6 +1043,10 @@ function createAutopilot(ctx, opts = {}) {
       })),
       playbookFiles: lv.playbookFiles || [],
       hint: lv.hint,
+      // The level's base.md (design-v2 "base.md"): in use (its size), or a problem; the text itself is
+      // read only when the panel opens it (openBase), so the state message stays small.
+      base: lv.base ? { size: lv.base.size } : null,
+      baseProblem: lv.baseProblem || null,
     }
   }
 
@@ -957,7 +1056,7 @@ function createAutopilot(ctx, opts = {}) {
       problems: [...loaded.problems],
       // Plain notes, never problems (no badge): a v1 rules.json that is not read.
       hints: loaded.hints.map((h) => `${S.LEVEL_LABELS[h.level]} folder: ${h.text}`),
-      rules: loaded.rules.map((r) => ({ ref: r.ref, level: r.level, id: r.id, on: r.enabled, summary: R.summaryOf(r), warnings: warningsOf(r), triage: r.jev ? 'jev' : 'none', playbook: r.playbook })),
+      rules: loaded.rules.map((r) => ({ ref: r.ref, level: r.level, id: r.id, on: r.enabled, summary: R.summaryOf(r), warnings: warningsOf(r), triage: r.jev ? 'jev' : 'none', playbook: r.playbook, act: r.act, mode: r.mode })),
       levels: S.LEVELS.map(levelStatus),
       jev: ctx.services.available(JEV),
       sources: sourceList().map((s) => ({ pluginId: s.pluginId, label: s.desc.label, kind: s.desc.kind, items: s.items.length, ...(s.error ? { error: s.error } : {}) })),
@@ -1096,7 +1195,7 @@ function createAutopilot(ctx, opts = {}) {
       let stub = null
       await editRules(m, (raw) => {
         const next = M.applySave(raw, { ...ref, rule: m.rule })
-        if (m.newPlaybook === true) stub = m.rule.playbook
+        if (m.newPlaybook === true && typeof m.rule.playbook === 'string') stub = m.rule.playbook
         return next
       })
       // "New playbook…" in the form: the file gets a first text when there is none (the panel opens
@@ -1105,7 +1204,7 @@ function createAutopilot(ctx, opts = {}) {
       if (stub) {
         const folder = editFolder(m.level)
         const exists = await fs.lstat(M.playbookPath(folder, stub)).then(() => true, () => false)
-        if (!exists) await M.writePlaybook(fs, folder, { name: stub, body: M.playbookStub(stub), create: true }, randomBytes)
+        if (!exists) await M.writePlaybook(fs, folder, { name: stub, body: M.playbookStub(stub, m.rule.mode), create: true }, randomBytes)
       }
       return { id: m.rule.id, level: m.level, ...(stub ? { playbook: stub } : {}) }
     },
@@ -1124,6 +1223,15 @@ function createAutopilot(ctx, opts = {}) {
       if (cur.exists && !cur.list) throw new M.ManageError(`${R.RULES_FILE} is not a JSON list of rules, so which rules use ${m.name} cannot be told: fix it first`)
       await M.deletePlaybook(fs, folder, m.name, cur.raw)
       return { name: m.name, level: m.level }
+    },
+    // The level's base.md, edited like a playbook: read with its hash, written only over the file the
+    // editor was shown (a hand edit since is "changed on disk"); an empty text removes the file.
+    async openBase(m) {
+      return { ...(await M.readBase(fs, editFolder(m.level))), level: m.level }
+    },
+    async saveBase(m) {
+      const hash = await M.writeBase(fs, editFolder(m.level), { body: m.body, hash: m.hash === undefined ? null : m.hash }, randomBytes)
+      return { level: m.level, hash, removed: hash === null }
     },
     async createFolder(m) {
       const folder = editFolder(m.level)
@@ -1288,8 +1396,16 @@ function createAutopilot(ctx, opts = {}) {
     }
     const folder = folderOf(level)
     if (!folder) return { error: `Nothing stored: there is no ${level} rules folder` }
+    // An act rule names no playbook: nothing to find.
+    if (c.rule.act) return { rule: c.rule, warnings: c.warnings }
     const exists = await fs.stat(M.playbookPath(folder, c.rule.playbook)).then((st) => st.isFile(), () => false)
     if (!exists) return { error: `Nothing stored: playbook ${CLI.oneLine(c.rule.playbook, 64)} not found in ${R.displayPath(folder, home)}/${R.PLAYBOOKS_DIR} (the ${level} folder, where this rule's playbook resolves): write it first (ccc autopilot playbooks set --${level} ${CLI.oneLine(c.rule.playbook, 64)} -)` }
+    // Act mode needs the playbook's "Allowed actions" list (rules.js would make the stored rule a
+    // problem that never runs): refused here, so a tab learns it before anything is written.
+    if (c.rule.mode === 'act') {
+      const pb = await M.readPlaybook(fs, folder, c.rule.playbook).catch(() => null)
+      if (!pb || !S.hasAllowedActions(R.parsePlaybook(pb.body).body)) return { error: `Nothing stored: mode "act" needs an "${S.ALLOWED_ACTIONS}" section in ${R.PLAYBOOKS_DIR}/${CLI.oneLine(c.rule.playbook, 64)}.md: a heading "## ${S.ALLOWED_ACTIONS}" with each action the session may take as a list item (ccc autopilot playbooks set --${level} ${CLI.oneLine(c.rule.playbook, 64)} -)` }
+    }
     return { rule: c.rule, warnings: c.warnings }
   }
 
@@ -1447,6 +1563,51 @@ function createAutopilot(ctx, opts = {}) {
     }
   }
 
+  /**
+   * `ccc autopilot base [show|set]` (design-v2 "base.md"): show reads both levels (or the one named);
+   * set writes the level a write goes to (writeLevel), through the panel's own check, with the hash of
+   * the file as it is now, so a hand edit between the read and the rename is refused, not lost. An empty
+   * text removes the file.
+   */
+  async function cliBase(p, stdin) {
+    await reloadRules()
+    try {
+      if (p.sub === 'show') {
+        const out = []
+        for (const l of p.level ? [p.level] : ['global', 'project']) {
+          const folder = folderOf(l)
+          if (!folder) {
+            if (p.level) return { stderr: `There is no ${l} rules folder.\n`, code: 1 }
+            continue
+          }
+          const b = await M.readBase(fs, folder)
+          const where = `${R.displayPath(folder, home)}/${S.BASE_FILE}`
+          out.push(b.exists ? `--- ${l}: ${where} ---\n${b.body.endsWith('\n') ? b.body : `${b.body}\n`}` : `--- ${l}: no ${where} ---\n`)
+        }
+        if (!out.length) return { stderr: 'No rules folder: set the app setting "Global rules folder" or the project setting "Project rules folder".\n', code: 1 }
+        return { stdout: out.join('\n') }
+      }
+      const w = writeLevel(p.level)
+      if (w.error) return { stderr: `${w.error}\n`, code: 2 }
+      const level = w.level
+      const folder = folderOf(level)
+      // An empty argument clears the file; stdin must carry text (inputText refuses an empty one).
+      const t = p.input.text !== undefined ? { text: p.input.text } : CLI.inputText(p.input, stdin)
+      if (t.error) return { stderr: `${t.error}\n`, code: 2 }
+      const res = await serial(async () => {
+        const cur = await M.readBase(fs, folder)
+        return manageActs.saveBase({ level, body: t.text, hash: cur.hash })
+      })
+      await reloadRules()
+      publish()
+      const where = `${R.displayPath(folder, home)}/${S.BASE_FILE}`
+      return { stdout: res.removed ? `No ${where} now (${level}): sessions get no ${level} standing instructions.\n` : `Wrote ${where} (${level}): every Autopilot session prompt carries it after the fixed frame.\n` }
+    } catch (e) {
+      if (e instanceof M.ManageError) return nothingStored(e)
+      throw e
+    }
+  }
+
   if (ctx.cli && typeof ctx.cli.register === 'function') {
     disposers.push(
       ctx.cli.register('autopilot', async (argv, call) => {
@@ -1504,6 +1665,8 @@ function createAutopilot(ctx, opts = {}) {
               return await cliRules(p, call && call.stdin)
             case 'playbooks':
               return await cliPlaybooks(p, call && call.stdin)
+            case 'base':
+              return await cliBase(p, call && call.stdin)
             default:
               return { stderr: `${CLI.USAGE}\n`, code: 2 }
           }

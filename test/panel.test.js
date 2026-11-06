@@ -211,7 +211,8 @@ test('the rule form: from a raw v2 rule and back, in key order; a new rule start
   const f = V.formFromRaw(raw, ST, 'project')
   assert.deepEqual([f.sourceAny, f.sources, f.jevOn, f.min, f.perDay, f.cooldownMinutes, f.model, f.effort], [false, ['bronos.jira', 'bronos.chat'], true, '0.8', '5', '0', 'sonnet', 'high'])
   assert.deepEqual(V.formToRule(f), raw)
-  assert.deepEqual(Object.keys(V.formToRule(f)), [...S.RULE_KEYS])
+  // Every key in file order but act (a session rule) and mode (left out at its default, investigate).
+  assert.deepEqual(Object.keys(V.formToRule(f)), S.RULE_KEYS.filter((k) => k !== 'act' && k !== 'mode'))
   const fresh = V.formFromRaw(null, ST, 'project')
   assert.deepEqual([fresh.enabled, fresh.playbook, fresh.perDay, fresh.cooldownMinutes, fresh.jevOn, fresh.sources, fresh.sourceAny, fresh.model, fresh.confirmAll], [false, 'check', '10', '30', false, [], false, '', false])
   const out = V.formToRule({ ...fresh, id: 'x', sources: ['bronos.jira'], when: [{ field: 'title', op: 'contains', value: 'down' }], perDay: '', cooldownMinutes: ' ' })

@@ -26,14 +26,16 @@ const FIELDS = [
   ['hours', 'object', 'active hours, local time of the machine Autopilot runs on: { "from": "22:00", "to": "07:00" }; "HH:MM" 24-hour; from is inclusive, to is exclusive; to before from crosses midnight (22:00 to 07:00 is the night); the same time twice is an error. Outside them the rule does not fire and the item is not queued for later; left out: any time'],
   ['hours.from', 'string "HH:MM"', 'start of the window, inclusive'],
   ['hours.to', 'string "HH:MM"', 'end of the window, exclusive'],
-  ['playbook', 'string, required', "the playbook file playbooks/<name>.md of the rule's own level (a global rule never reads a project's playbooks/), named without \".md\""],
-  ['check', 'string', `at most ${S.MAX_CHECK} characters: what the session checks first against the full item (it may name what only the item shows, a screenshot too); when it does not hold, the session says so in one line and stops. Left out: no check`],
-  ['model', `${S.MODEL_LIST.join(' | ')}`, "the session's model; left out: your default. Needs cc-cockpit 0.11, older apps ignore it"],
-  ['effort', `${S.EFFORT_LIST.join(' | ')}`, "the session's effort; left out: your default. Needs cc-cockpit 0.11, older apps ignore it"],
-  ['onChange', 'true | false', 'default false (a rule fires once per item); true sends a newer version of the item (a reply, a comment, a status change) to the same session'],
+  ['playbook', 'string', "a session rule: the playbook file playbooks/<name>.md of the rule's own level (a global rule never reads a project's playbooks/), named without \".md\". A rule has playbook or act, never both"],
+  ['act', 'string', `an act rule: one of the item's own actions that Autopilot runs itself, with no Claude session (markRead, markUnread, done, or an id the source offers); only on new items, and only when the item offers it then (else the next rule may take the item). Not ${S.ACT_REFUSED.map((a) => `"${a}"`).join(', ')}. An act rule has none of ${S.SESSION_KEYS.join(', ')}`],
+  ['mode', S.MODE_LIST.join(' | '), `a session rule: ${S.MODE_DEFAULT} (the default) changes nothing; act may carry out only the actions its playbook lists under a "${S.ALLOWED_ACTIONS}" heading, on that item only (a playbook without that list makes the rule a problem)`],
+  ['check', 'string', `a session rule, at most ${S.MAX_CHECK} characters: what the session checks first against the full item (it may name what only the item shows, a screenshot too); when it does not hold, the session says so in one line and stops. Left out: no check`],
+  ['model', `${S.MODEL_LIST.join(' | ')}`, "a session rule: the session's model; left out: your default. Needs cc-cockpit 0.11, older apps ignore it"],
+  ['effort', `${S.EFFORT_LIST.join(' | ')}`, "a session rule: the session's effort; left out: your default. Needs cc-cockpit 0.11, older apps ignore it"],
+  ['onChange', 'true | false', 'a session rule: default false (a rule fires once per item); true sends a newer version of the item (a reply, a comment, a status change) to the same session'],
   ['limits', 'object', 'per rule'],
-  ['limits.perDay', 'whole number', `${range('perDay')} sessions in a rolling 24 hours; default ${S.LIMITS.perDay.default}`],
-  ['limits.cooldownMinutes', 'whole number', `${range('cooldownMinutes')} minutes between two sessions of this rule; default ${S.LIMITS.cooldownMinutes.default}`],
+  ['limits.perDay', 'whole number', `${range('perDay')} sessions (an act rule: actions that succeeded) in a rolling 24 hours; default ${S.LIMITS.perDay.default}`],
+  ['limits.cooldownMinutes', 'whole number', `${range('cooldownMinutes')} minutes between two sessions (actions) of this rule; default ${S.LIMITS.cooldownMinutes.default}; an act rule usually wants 0`],
 ]
 
 /** The condition table, from conditions.js: `field  ops  value`. */
@@ -64,12 +66,33 @@ const EXAMPLE_RULE = Object.freeze({
   jev: { question: 'Does this message report that a website is down right now?', min: 0.7 },
   hours: { from: '22:00', to: '07:00' },
   playbook: 'site-check',
+  mode: 'investigate',
   check: 'The message reports that a website (such as shop.example.com) is down right now.',
   model: 'sonnet',
   effort: 'medium',
   onChange: false,
   limits: { perDay: 10, cooldownMinutes: 30 },
 })
+
+/** An act rule that passes the loader: marks notification mails of finished issues read, no session. Example data only. */
+const EXAMPLE_ACT_RULE = Object.freeze({
+  id: 'done-mails-read',
+  name: 'Finished-issue mails read',
+  enabled: false,
+  sources: ['bronos.gmail'],
+  when: [
+    { field: 'from.address', op: 'is', value: 'tracker@example.com' },
+    { field: 'title', op: 'contains', value: 'Done' },
+  ],
+  act: 'markRead',
+  limits: { perDay: 100, cooldownMinutes: 0 },
+})
+
+/** The part an act-mode playbook needs (schema.js hasAllowedActions). Example data only. */
+const EXAMPLE_ALLOWED = `## ${S.ALLOWED_ACTIONS}
+
+- Append one line to ~/notes/site-incidents.md: the date, the hostname and the status code.
+- Check the site once more after two minutes, with the same command.`
 
 const EXAMPLE_PLAYBOOK = `# Check a website
 
@@ -137,10 +160,31 @@ A playbook, ${S.PLAYBOOKS_DIR}/<name>.md:
   the rule's (model: ${S.MODEL_LIST.join(', ')}; effort: ${S.EFFORT_LIST.join(', ')}), not the
   playbook's: front matter in a playbook is ignored. Name the places the session may check itself
   (your hosts, projects), so it never has to take one from the item. Autopilot adds a fixed frame
-  before it: investigate only, the item fenced and untrusted, the rule's check (when it has one) made first.
+  before it: the item fenced and untrusted, the injection check, the rule's check (when it has one)
+  made first, and the permission of the rule's mode: investigate only, or (mode "act") only the
+  actions listed under the playbook's "${S.ALLOWED_ACTIONS}" heading, on that item only.
 
 Example ${S.PLAYBOOKS_DIR}/site-check.md:
 ${EXAMPLE_PLAYBOOK}
+
+An act-mode playbook adds the list (each action with its exact target; a value from the item only where
+the playbook says how):
+${EXAMPLE_ALLOWED}
+
+Three kinds of rule, from least to most power:
+  act rule          "act": one of the item's own actions (mark read, done): no Claude, so no outside
+                    text reaches a model. Use it whenever that one action is the whole job.
+  mode investigate  a session that looks and reports; it changes nothing (the default).
+  mode act          a session that may also carry out the playbook's listed actions. Claude Code's own
+                    permission settings still apply inside the tab: anything they do not allow waits.
+
+Example act rule (no playbook):
+${JSON.stringify(EXAMPLE_ACT_RULE, null, 2)}
+
+${S.BASE_FILE} (optional, in either level's folder, at most ${kib(S.MAX_BASE_BYTES)}): your standing instructions for
+every Autopilot session (how to report, what never to touch). Its text goes into each session's prompt
+after the fixed frame and before the item (global first, then project). It cannot remove or reorder the
+frame. A ${S.BASE_FILE} that is there but cannot be read opens no session until it is fixed.
 
 After an edit: \`ccc autopilot reload\` lists the problems; \`ccc autopilot test <id>\` is a dry run over
 the items in the feeds now (it starts no session). Writes take --project or --global when both folders exist.
@@ -167,4 +211,4 @@ function askPrompt(folders) {
   return text
 }
 
-module.exports = { FIELDS, EXAMPLE_RULE, EXAMPLE_PLAYBOOK, formatText, askPrompt }
+module.exports = { FIELDS, EXAMPLE_RULE, EXAMPLE_ACT_RULE, EXAMPLE_ALLOWED, EXAMPLE_PLAYBOOK, formatText, askPrompt }

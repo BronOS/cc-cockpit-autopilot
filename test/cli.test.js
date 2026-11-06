@@ -108,7 +108,7 @@ test('test: the dry run text; an unknown rule is exit 1; bad arguments exit 2; h
   assert.match(bad.stderr, /log takes a number from 1 to 200/)
   assert.equal((await t.ctx.runCli(['frobnicate'])).code, 2)
   const help = await t.ctx.runCli(['help'])
-  assert.match(help.stdout, /^ccc autopilot: start a Claude session/)
+  assert.match(help.stdout, /^ccc autopilot: when a feed item matches one of your rules, start a Claude session on it, or run one of\n/)
   assert.equal(help.code, undefined)
   t.done()
 })
@@ -530,4 +530,76 @@ test('rules add and playbooks set work into a missing file and a missing folder'
   } finally {
     fs.rmSync(base, { recursive: true, force: true })
   }
+})
+
+// ---- 0.3.0: base, act rules, act mode ----
+
+test('parse: base show is the default; set takes one text or -; levels; bad arguments are usage errors', () => {
+  assert.deepEqual(CLI.parse(['base']), { cmd: 'base', sub: 'show' })
+  assert.deepEqual(CLI.parse(['base', 'show', '--global']), { cmd: 'base', sub: 'show', level: 'global' })
+  assert.deepEqual(CLI.parse(['base', 'set', '--project', '-']), { cmd: 'base', sub: 'set', level: 'project', input: { stdin: true } })
+  assert.deepEqual(CLI.parse(['base', 'set', 'Be brief.']), { cmd: 'base', sub: 'set', input: { text: 'Be brief.' } })
+  assert.deepEqual(CLI.parse(['base', 'set', '']), { cmd: 'base', sub: 'set', input: { text: '' } })
+  for (const bad of [['base', 'rm'], ['base', 'show', 'x'], ['base', 'set'], ['base', 'set', 'a', 'b'], ['base', '--global', '--project']]) {
+    const p = CLI.parse(bad)
+    assert.ok(p.error, bad.join(' '))
+    assert.match(p.error, /Usage: ccc autopilot/)
+  }
+  assert.match(CLI.HELP, /ccc autopilot base \[show\] \[--project\|--global\]\n[\s\S]*ccc autopilot base set <text\|-> /)
+  assert.deepEqual(CLI.BASE_SUBS, ['show', 'set'])
+})
+
+test('base: show both levels, set by argument or stdin into the one level, an empty text removes it; status says it is in use', async () => {
+  const t = await setupBoth([rule('p')], [rule('g')])
+  let s = await t.ctx.runCli(['base'])
+  assert.match(s.stdout, /^--- global: no .*\/base\.md ---\n\n--- project: no .*\/base\.md ---\n$/)
+  // Two levels: a write names one.
+  assert.equal((await t.ctx.runCli(['base', 'set', 'x'])).code, 2)
+  let w = await t.ctx.runCli(['base', 'set', '--global', '-'], undefined, 'Reply in English.\n')
+  assert.match(w.stdout, /^Wrote .*\/base\.md \(global\): every Autopilot session prompt carries it after the fixed frame\.\n$/)
+  assert.equal(fs.readFileSync(path.join(t.gdir, 'base.md'), 'utf8'), 'Reply in English.\n')
+  assert.equal(fs.existsSync(path.join(t.dir, 'base.md')), false)
+  await t.ctx.runCli(['base', 'set', '--project', 'Keep it short.'])
+  s = await t.ctx.runCli(['base'])
+  assert.match(s.stdout, /^--- global: .*\/base\.md ---\nReply in English\.\n\n--- project: .*\/base\.md ---\nKeep it short\.\n$/)
+  assert.equal((await t.ctx.runCli(['base', 'show', '--project'])).stdout.split('\n')[1], 'Keep it short.')
+  assert.match((await t.ctx.runCli(['status'])).stdout, /base\.md in use \(15 bytes\)/)
+  // Empty stdin is refused (exit 2), an empty argument removes the file.
+  assert.equal((await t.ctx.runCli(['base', 'set', '--project', '-'], undefined, '')).code, 2)
+  w = await t.ctx.runCli(['base', 'set', '--project', ''])
+  assert.match(w.stdout, /^No .*\/base\.md now \(project\): sessions get no project standing instructions\.\n$/)
+  assert.equal(fs.existsSync(path.join(t.dir, 'base.md')), false)
+  // Over the cap: nothing stored, exit 1.
+  const big = await t.ctx.runCli(['base', 'set', '--global', '-'], undefined, 'z'.repeat(17 * 1024))
+  assert.equal(big.code, 1)
+  assert.match(big.stderr, /Nothing stored: base\.md is at most 16 KiB/)
+  assert.equal(fs.readFileSync(path.join(t.gdir, 'base.md'), 'utf8'), 'Reply in English.\n')
+  t.done()
+})
+
+test('rules add: an act rule needs no playbook; act mode is refused until the playbook lists its Allowed actions', async () => {
+  const t = await setup([rule('down')])
+  const act = { id: 'read-done', sources: ['bronos.gmail'], when: [{ field: 'title', op: 'contains', value: 'Done' }], act: 'markRead' }
+  const a = await t.ctx.runCli(['rules', 'add', J(act)])
+  assert.equal(a.code, undefined, a.stderr)
+  assert.match(a.stdout, /Rule project:read-done \(project rule 2\) is off: bronos\.gmail, title contains Done · runs markRead on new items \(no session\)/)
+  // Stored like any rule: off, the default limits written; no playbook, mode or session key.
+  assert.deepEqual(listOf(t)[1], { id: 'read-done', enabled: false, sources: ['bronos.gmail'], when: [{ field: 'title', op: 'contains', value: 'Done' }], act: 'markRead', limits: { perDay: 10, cooldownMinutes: 30 } })
+  for (const [bad, re] of [[{ ...act, id: 'o', act: 'open' }, /open/], [{ ...act, id: 'b', playbook: 'check' }, /playbook/], [{ ...act, id: 'e', effort: 'low' }, /effort is for a session rule/], [{ ...act, id: 'm', mode: 'act' }, /mode is for a session rule/]]) {
+    const r = await t.ctx.runCli(['rules', 'add', J(bad)])
+    assert.equal(r.code, 1, J(bad))
+    assert.match(r.stderr, re)
+  }
+  const refused = await t.ctx.runCli(['rules', 'add', J(newRule('fix', { mode: 'act' }))])
+  assert.equal(refused.code, 1)
+  assert.match(refused.stderr, /Nothing stored: mode "act" needs an "Allowed actions" section in playbooks\/check\.md/)
+  await t.ctx.runCli(['playbooks', 'set', 'check', '-'], undefined, 'Check it.\n\n## Allowed actions\n\n- Restart the test runner once.\n')
+  const ok = await t.ctx.runCli(['rules', 'add', J(newRule('fix', { mode: 'act' }))])
+  assert.equal(ok.code, undefined, ok.stderr)
+  assert.match(ok.stdout, /act mode/)
+  assert.equal(listOf(t).at(-1).mode, 'act')
+  // The default mode is never written.
+  await t.ctx.runCli(['rules', 'add', J(newRule('look', { mode: 'investigate' }))])
+  assert.equal('mode' in listOf(t).at(-1), false)
+  t.done()
 })

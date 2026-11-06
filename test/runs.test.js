@@ -75,7 +75,10 @@ test('records: a stored value is checked like any input; a bad entry is dropped'
   assert.equal(RUNS.recordOf({ source: SRC, itemId: 'A' }), null)
   assert.equal(RUNS.recordOf('x'), null)
   const r = RUNS.recordOf({ source: SRC, itemId: 'A', tabId: 't1', rule: 'down', openedAt: NOW, deliveries: -1, stopped: 'yes', sessionId: '', extra: 1 })
-  assert.deepEqual(r, { source: SRC, itemId: 'A', tabId: 't1', sessionId: null, rule: 'down', rev: '', openedAt: NOW, deliveries: 0, stopped: false, runId: '', takenOver: false })
+  assert.deepEqual(r, { source: SRC, itemId: 'A', tabId: 't1', sessionId: null, rule: 'down', rev: '', openedAt: NOW, deliveries: 0, stopped: false, runId: '', takenOver: false, mode: 'investigate' })
+  // The mode a tab was opened with (0.3.0): act kept, anything else read as investigate.
+  assert.equal(RUNS.recordOf({ source: SRC, itemId: 'A', tabId: 't1', rule: 'down', openedAt: NOW, mode: 'act' }).mode, 'act')
+  assert.equal(RUNS.recordOf({ source: SRC, itemId: 'A', tabId: 't1', rule: 'down', openedAt: NOW, mode: 'bypass' }).mode, 'investigate')
   const storage = fakeStorage()
   await storage.set(RUNS.KEY, [{ source: SRC, itemId: 'A', tabId: 't1', rule: 'down', openedAt: NOW }, { junk: true }, null])
   const runs = RUNS.createRuns({ storage, now: () => NOW })
@@ -110,7 +113,7 @@ test('one tab per item: the record, a new rev while the tab is open, a closed ta
   assert.deepEqual(Object.keys(t.ctx.opened[0]).sort(), ['cwd', 'effort', 'model', 'prompt'])
   assert.deepEqual([t.ctx.opened[0].model, t.ctx.opened[0].effort], ['sonnet', 'high'])
   const [rec] = t.ap.runs.list()
-  assert.deepEqual({ ...rec, openedAt: undefined, runId: undefined }, { source: SRC, itemId: 'A', tabId: 'tab-1', sessionId: null, rule: 'project:down', rev: 'a', openedAt: undefined, deliveries: 0, stopped: false, runId: undefined, takenOver: false, status: 'starting', pending: null })
+  assert.deepEqual({ ...rec, openedAt: undefined, runId: undefined }, { source: SRC, itemId: 'A', tabId: 'tab-1', sessionId: null, rule: 'project:down', rev: 'a', openedAt: undefined, deliveries: 0, stopped: false, runId: undefined, takenOver: false, mode: 'investigate', status: 'starting', pending: null })
   // The onChange frame carries the run's stop command with the recorded run id.
   assert.ok(t.ctx.opened[0].prompt.includes(`ccc autopilot stop ${rec.runId}`))
   // Stored, and the sessionId filled in when Claude reports it.

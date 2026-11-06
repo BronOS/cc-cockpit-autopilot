@@ -257,3 +257,50 @@ test('hostile events: prototype keys, wrong types and an item without from or pl
   assert.ok(news.length >= 1)
   store.dispose()
 })
+
+// ---- 0.3.0: new items (an act rule's trigger) and act() ----
+
+test('isNew: an item that came in after the baseline, at the rev it came with; not a baseline item, not a change', async () => {
+  const chat = fakeFeed(CHAT, [item('a')])
+  const { ctx, store } = await setup({ 'bronos.chat': chat })
+  const isNew = (id, rev) => store.isNew('bronos.chat', id, rev)
+  assert.equal(isNew('a', 'a-r1'), false, 'the baseline is not new')
+  await emit(ctx, 'bronos.chat', 'item', item('b'))
+  assert.equal(isNew('b', 'b-r1'), true)
+  await emit(ctx, 'bronos.chat', 'item', item('a', { rev: 'a-r2' }))
+  assert.equal(isNew('a', 'a-r2'), false, 'a baseline item that changed')
+  await emit(ctx, 'bronos.chat', 'item', item('b', { rev: 'b-r2' }))
+  assert.equal(isNew('b', 'b-r2'), false, 'a new item that changed')
+  assert.equal(isNew('b', 'b-r1'), true, 'the rev it came with is still its birth rev')
+  // A read change (same rev) changes nothing; gone forgets it, and back it is new again.
+  await emit(ctx, 'bronos.chat', 'gone', { ids: ['b'] })
+  assert.equal(isNew('b', 'b-r1'), false)
+  await emit(ctx, 'bronos.chat', 'sync', { items: [item('a', { rev: 'a-r2' }), item('b', { rev: 'b-r3' }), item('c')], state: 'ok', asOf: NOW })
+  assert.deepEqual([isNew('b', 'b-r3'), isNew('c', 'c-r1')], [true, true])
+  // A full list without it forgets it; a rebaseline forgets them all; an unknown source has none.
+  await emit(ctx, 'bronos.chat', 'sync', { items: [item('a', { rev: 'a-r2' }), item('c')], state: 'ok', asOf: NOW })
+  assert.equal(isNew('b', 'b-r3'), false)
+  store.rebaseline()
+  assert.equal(isNew('c', 'c-r1'), false)
+  assert.equal(store.isNew('bronos.nope', 'c', 'c-r1'), false)
+})
+
+test('act: the source\'s answer checked; a rejection, a late or unreadable answer, a gone source are failures with a reason', async () => {
+  const mail = fakeFeed(MAIL, [item('a')])
+  const { ctx, store } = await setup({ 'bronos.gmail': mail }, { callMs: 50 })
+  assert.deepEqual(await store.act('bronos.gmail', 'a', 'markRead'), { ok: true })
+  assert.deepEqual(mail.calls.filter((c) => c[0] === 'act'), [['act', 'a', 'markRead']])
+  mail.actResult = { ok: false, message: 'no such item\nnow' }
+  assert.deepEqual(await store.act('bronos.gmail', 'a', 'done'), { ok: false, message: 'no such item now' })
+  mail.actResult = { ok: false }
+  assert.deepEqual(await store.act('bronos.gmail', 'a', 'done'), { ok: false, message: 'Mail refused done without a reason' })
+  mail.actResult = 'yes'
+  assert.deepEqual(await store.act('bronos.gmail', 'a', 'done'), { ok: false, message: 'the source answered something Autopilot cannot read' })
+  mail.throwOn = 'act'
+  assert.deepEqual(await store.act('bronos.gmail', 'a', 'done'), { ok: false, message: 'act broke' })
+  mail.throwOn = null
+  mail.onAct = () => new Promise(() => {})
+  assert.deepEqual(await store.act('bronos.gmail', 'a', 'done'), { ok: false, message: 'Mail done did not answer in 0 s' })
+  assert.deepEqual(await store.act('bronos.other', 'a', 'done'), { ok: false, message: 'bronos.other is no longer a source' })
+  ctx.removeProvider('bronos.gmail')
+})

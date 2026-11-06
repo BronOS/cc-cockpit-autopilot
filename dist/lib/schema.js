@@ -11,7 +11,14 @@
 // process.
 //
 // The v2 rule (design-v2 "Rules"): id, name, enabled, sources (required), when, jev, hours, playbook
-// (required), check, model, effort, onChange, limits. v2 reads its own file, autopilot-rules.json, so a
+// or act (exactly one of them), mode, check, model, effort, onChange, limits.
+//
+// Two kinds of rule (0.3.0, design-v2 "Autopilot 0.3.0"): a SESSION rule names a `playbook` and opens a
+// Claude tab (its `mode` says whether the session only investigates or may carry out the playbook's
+// "Allowed actions"); an ACT rule names `act`, one of the item's own feed actions (markRead, done, ...),
+// which Autopilot runs itself through the source's inbox-feed `act`, with no tab and no prompt. An act
+// rule has nothing a session would read, so the session-only keys are refused on it rather than
+// ignored: a `check` that silently does nothing would look like a guard the person thinks they have. v2 reads its own file, autopilot-rules.json, so a
 // person's v1 rules.json next to it is never read nor written (design-v2 "Migration from v1"). An entry
 // with v1's `match` or `triage` in the new file gets no special treatment: it is an invalid rule like any
 // other (it has no `sources`), and its problem line says that `match` is a v1 key.
@@ -76,9 +83,27 @@
   })
   const LIMIT_DEFAULTS = Object.freeze({ perDay: LIMITS.perDay.default, cooldownMinutes: LIMITS.cooldownMinutes.default })
   const JEV_MIN_DEFAULT = 0.7
+  // An act rule's action: the inbox-feed v2 action id shape (bronos.inbox design-v2 "The item", the same
+  // pattern lib/feed.js checks an item's `actions` with), so a rule can only name an id a source can offer.
+  const ACTION_ID = /^[a-z][A-Za-z0-9-]{0,39}$/
+  // `open` opens a window for a person to look at (an overlay, a browser tab): with nobody watching it is
+  // never what an unattended rule should do, and a burst of items would open a burst of windows.
+  const ACT_REFUSED = Object.freeze(['open'])
+  // The keys only a session reads: refused on an act rule (see the header).
+  const SESSION_KEYS = Object.freeze(['mode', 'check', 'model', 'effort', 'onChange'])
+  // A session rule's mode: `investigate` (the default, the frame's "change nothing") or `act` (only the
+  // actions the playbook lists under its "Allowed actions" heading). lib/prompt.js words each.
+  const MODE_LIST = Object.freeze(['investigate', 'act'])
+  const MODE_DEFAULT = 'investigate'
+  const ALLOWED_ACTIONS = 'Allowed actions'
+  // The person's standing instructions for every session (design-v2 "base.md"), one per level folder.
+  // 16 KiB each: both levels' base.md plus a 64 KiB playbook, the frame and the item stay under Linux's
+  // 128 KiB per-argument limit (the prompt is one argument of ctx.sessions.open).
+  const BASE_FILE = 'base.md'
+  const MAX_BASE_BYTES = 16 * 1024
 
   // In the order a rule is written (the README's example, and the panel's saves).
-  const RULE_KEYS = Object.freeze(['id', 'name', 'enabled', 'sources', 'when', 'jev', 'hours', 'playbook', 'check', 'model', 'effort', 'onChange', 'limits'])
+  const RULE_KEYS = Object.freeze(['id', 'name', 'enabled', 'sources', 'when', 'jev', 'hours', 'playbook', 'act', 'mode', 'check', 'model', 'effort', 'onChange', 'limits'])
   const JEV_KEYS = Object.freeze(['question', 'min'])
   // v1's keys. Unknown keys like any other (warned, never read), but named as v1's in the warning and in
   // the problem line of an invalid rule, since a person who copied a v1 rule over expects them to work.
@@ -231,6 +256,29 @@
   /** The window for a person: "22:00–07:00". */
   const hoursLabel = (hours) => `${hours.from}–${hours.to}`
 
+  const HEADING = /^#{1,6}[ \t]/
+  const ALLOWED_HEADING = /^#{1,6}[ \t]+allowed actions[ \t]*:?[ \t]*#*[ \t]*$/i
+  const LIST_ITEM = /^[ \t]*(?:[-*+]|\d{1,3}[.)])[ \t]+\S/
+  /**
+   * Does a playbook body have an "Allowed actions" section: a Markdown heading of that name (any level,
+   * any case) with at least one list item under it before the next heading? An act-mode rule needs one
+   * (design-v2 "Mode per session rule"): the frame lets the session do only what is listed there, so a
+   * playbook without the list is a rule the person has not finished, shown as a problem and never run.
+   * A list item and not any text, so a stub's comment or a sentence about the list is not a list. Line
+   * by line with fixed patterns (none from the person), linear in the body's length.
+   */
+  function hasAllowedActions(body) {
+    let inside = false
+    for (const line of String(body == null ? '' : body).split('\n')) {
+      if (HEADING.test(line)) {
+        inside = ALLOWED_HEADING.test(line)
+        continue
+      }
+      if (inside && LIST_ITEM.test(line)) return true
+    }
+    return false
+  }
+
   /**
    * One rule checked: `{ rule, warnings, errors }`. `rule` is the whole valid rule (defaults filled
    * in) or null; `errors` lists every bad field in file order as `{ field, message }`, the field being
@@ -265,31 +313,59 @@
     add(() => {
       if (enabled !== undefined && typeof enabled !== 'boolean') bad('enabled must be true or false')
     })
+    const pb = own(raw, 'playbook')
+    const act = own(raw, 'act')
+    // An act rule: `act` and no playbook (both set is an error below, and the rule is then judged as a session one).
+    const isAct = act !== undefined && pb === undefined
     const onChange = own(raw, 'onChange')
     add(() => {
-      if (onChange !== undefined && typeof onChange !== 'boolean') bad('onChange must be true or false')
+      // On an act rule its presence is the error (below), whatever the value.
+      if (!isAct && onChange !== undefined && typeof onChange !== 'boolean') bad('onChange must be true or false')
     })
     const sources = add(() => sourcesOf(own(raw, 'sources')))
     const when = add(() => whenOf(own(raw, 'when')))
     const jev = add(() => jevOf(own(raw, 'jev'), warnings, add))
-    const pb = own(raw, 'playbook')
+    // Exactly one of playbook (a session) and act (an item action, no session). Both would leave it to a
+    // guess whether a Claude tab opens; neither is a rule that does nothing.
     add(() => {
-      if (typeof pb !== 'string' || !PLAYBOOK_NAME.test(pb)) bad('playbook must be a file name without ".md" (letters, digits, "_" or "-"; no dot or slash)')
+      if (pb !== undefined && act !== undefined) bad('playbook and act are both set: a rule either opens a session with a playbook or runs one of the item\'s actions (act), not both')
+      if (pb === undefined && act === undefined) bad('playbook is missing: name a playbook (a Claude session) or an act (one of the item\'s own actions, such as markRead, with no session)')
     })
+    add(() => {
+      if (pb !== undefined && (typeof pb !== 'string' || !PLAYBOOK_NAME.test(pb))) bad('playbook must be a file name without ".md" (letters, digits, "_" or "-"; no dot or slash)')
+    })
+    add(() => {
+      if (act === undefined) return
+      if (typeof act !== 'string' || !ACTION_ID.test(act)) bad('act must be an action id of the item (markRead, markUnread, done, or one the source offers: a lower-case letter, then letters, digits or "-", at most 40)')
+      if (ACT_REFUSED.includes(act)) bad('act cannot be "open": it opens a window for a person, which an unattended rule must not do (use a session rule to look at the item)')
+    })
+    const mode = own(raw, 'mode')
     const check = own(raw, 'check')
-    add(() => {
-      if (check === undefined) return
-      if (typeof check !== 'string') bad('check must be text')
-      if (oneLine(check).length > MAX_CHECK) bad(`check is over ${MAX_CHECK} characters`)
-    })
     const model = own(raw, 'model')
-    add(() => {
-      if (model !== undefined && !MODEL_LIST.includes(model)) bad(`model must be one of ${MODEL_LIST.join(', ')} (or left out for your default)`)
-    })
     const effort = own(raw, 'effort')
-    add(() => {
-      if (effort !== undefined && !EFFORT_LIST.includes(effort)) bad(`effort must be one of ${EFFORT_LIST.join(', ')} (or left out for your default)`)
-    })
+    if (isAct) {
+      // Refused, not ignored (see the header): one error per key, under its own field.
+      for (const k of SESSION_KEYS) {
+        add(() => {
+          if (own(raw, k) !== undefined) bad(`${k} is for a session rule: an act rule runs ${quote(act, 40)} itself and opens no session, so it has no ${k} (remove it)`)
+        })
+      }
+    } else {
+      add(() => {
+        if (mode !== undefined && !MODE_LIST.includes(mode)) bad(`mode must be one of ${MODE_LIST.join(', ')} (or left out for ${MODE_DEFAULT})`)
+      })
+      add(() => {
+        if (check === undefined) return
+        if (typeof check !== 'string') bad('check must be text')
+        if (oneLine(check).length > MAX_CHECK) bad(`check is over ${MAX_CHECK} characters`)
+      })
+      add(() => {
+        if (model !== undefined && !MODEL_LIST.includes(model)) bad(`model must be one of ${MODEL_LIST.join(', ')} (or left out for your default)`)
+      })
+      add(() => {
+        if (effort !== undefined && !EFFORT_LIST.includes(effort)) bad(`effort must be one of ${EFFORT_LIST.join(', ')} (or left out for your default)`)
+      })
+    }
     const hours = add(() => hoursOf(own(raw, 'hours'), warnings, add))
     const limits = add(() => limitsOf(own(raw, 'limits'), warnings, add))
     if (errors.length) {
@@ -306,11 +382,14 @@
       when,
       jev: jev || null,
       hours: hours || null,
-      playbook: pb,
-      check: text || null,
-      model: model || null,
-      effort: effort || null,
-      onChange: onChange === true,
+      // A session rule has a playbook and a mode; an act rule an action and neither.
+      playbook: isAct ? null : pb,
+      act: isAct ? act : null,
+      mode: isAct ? null : mode || MODE_DEFAULT,
+      check: isAct ? null : text || null,
+      model: isAct ? null : model || null,
+      effort: isAct ? null : effort || null,
+      onChange: !isAct && onChange === true,
       limits,
     }
     return { rule, warnings, errors }
@@ -364,7 +443,8 @@
 
   /**
    * A rule as it is written to the rules file: the keys in their usual order (RULE_KEYS), optional parts left
-   * out when empty, `enabled`, `sources`, `playbook`, `limits` and `onChange` always written. `r` is a
+   * out when empty, `enabled`, `sources`, `limits` always written, and `playbook` and `onChange` (a session
+   * rule) or `act` (an act rule). `r` is a
    * checked raw rule (the panel's form); its strings are written as given. `original` (the entry being
    * edited, or null) gives back the keys the form cannot show, an unknown key above all: a save never
    * drops something silently (the warning about it stays). Keys of a nested object the form does not
@@ -387,11 +467,19 @@
       out.hours = { from: h.from, to: h.to }
       for (const [k, v] of extraKeys(orig && orig.hours, HOURS_KEYS)) out.hours[k] = v
     }
-    out.playbook = r.playbook
-    if (typeof r.check === 'string' && r.check.trim()) out.check = r.check
-    if (r.model) out.model = r.model
-    if (r.effort) out.effort = r.effort
-    out.onChange = r.onChange === true
+    // An act rule is written with `act` and none of the session keys (checkRule refuses them on it); a
+    // session rule with its playbook, and `mode` only when it is not the default (a file that never
+    // says "mode" is an investigate rule, as every rule before 0.3.0).
+    const isAct = typeof r.act === 'string' && r.act !== '' && (r.playbook === undefined || r.playbook === null || r.playbook === '')
+    if (isAct) out.act = r.act
+    else {
+      out.playbook = r.playbook
+      if (r.mode && r.mode !== MODE_DEFAULT) out.mode = r.mode
+      if (typeof r.check === 'string' && r.check.trim()) out.check = r.check
+      if (r.model) out.model = r.model
+      if (r.effort) out.effort = r.effort
+      out.onChange = r.onChange === true
+    }
     const l = r.limits || {}
     out.limits = { perDay: l.perDay === undefined ? LIMIT_DEFAULTS.perDay : l.perDay, cooldownMinutes: l.cooldownMinutes === undefined ? LIMIT_DEFAULTS.cooldownMinutes : l.cooldownMinutes }
     for (const [k, v] of extraKeys(orig && orig.limits, LIMIT_KEYS)) out.limits[k] = v
@@ -427,6 +515,15 @@
     LIMITS,
     LIMIT_DEFAULTS,
     JEV_MIN_DEFAULT,
+    ACTION_ID,
+    ACT_REFUSED,
+    SESSION_KEYS,
+    MODE_LIST,
+    MODE_DEFAULT,
+    ALLOWED_ACTIONS,
+    BASE_FILE,
+    MAX_BASE_BYTES,
+    hasAllowedActions,
     RULE_KEYS,
     JEV_KEYS,
     V1_KEYS,

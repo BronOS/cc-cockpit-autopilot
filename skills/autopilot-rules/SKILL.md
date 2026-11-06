@@ -1,13 +1,13 @@
 ---
 name: autopilot-rules
-description: Use when asked to add, change, remove, reorder, test, explain or port the rules or playbooks of the cc-cockpit Autopilot plugin (bronos.autopilot), for example "investigate failed deploys in the Deploys space with sonnet", "why did Autopilot not fire on this", "write a playbook for X", "turn off the Jira rule", "port my old v1 rules.json", or when Autopilot started a session it should not have.
+description: Use when asked to add, change, remove, reorder, test, explain or port the rules, playbooks or base.md of the cc-cockpit Autopilot plugin (bronos.autopilot), for example "investigate failed deploys in the Deploys space with sonnet", "mark the Done notification mails read", "why did Autopilot not fire on this", "write a playbook for X", "turn off the Jira rule", "port my old v1 rules.json", or when Autopilot started a session it should not have.
 ---
 
-# Autopilot rules and playbooks (`ccc autopilot rules`, `ccc autopilot playbooks`)
+# Autopilot rules and playbooks (`ccc autopilot rules`, `ccc autopilot playbooks`, `ccc autopilot base`)
 
 Autopilot watches the inbox feeds (Chat, Mail, Jira and any other `inbox-feed` plugin). When a **new or
 changed item** matches a rule, it **starts a Claude session on its own** in a new tab, with the rule's playbook,
-and nobody asked for it. That is the point of the plugin and also its risk: a rule that is too loose starts many
+and nobody asked for it, or, for an **act rule**, runs one of the item's own actions (mark read, done) itself. That is the point of the plugin and also its risk: a rule that is too loose starts many
 sessions (each one costs money and reads outside text), and a rule on a source that outsiders can write to (mail
 above all) lets a stranger's text start a session. So you work like this:
 
@@ -32,6 +32,39 @@ from its **own** level's `playbooks/`. Ids are unique per level only, so a rule 
 levels; **every write needs the level when both folders exist**: add `--project` or `--global`, or name the rule
 as `project:<id>` / `global:<id>`. Ask the person which level a new rule belongs to when it is not clear: a rule
 about one project's deploys is a project rule, a rule about the person's mail usually a global one.
+
+## Which kind of rule
+
+Pick the least power that does the job:
+
+| The person wants | Write | Why |
+|---|---|---|
+| one of the item's own actions and nothing else ("mark these mails read", "mark it done") | an **act rule**: `"act": "markRead"` and no playbook | no Claude runs, so no outside text reaches a model: nothing to inject into, nothing to pay for |
+| someone to look and report ("investigate failed deploys") | a session rule, `"mode": "investigate"` (the default) | the session changes nothing |
+| a session that also does a few named things ("check the site, and log it in my notes file") | a session rule with `"mode": "act"` and an `## Allowed actions` list in its playbook | the session may do only what that list names, on that item |
+
+"Mark the Jira-Done notification emails read" is an **act rule**: a `bronos.gmail` rule whose `when` picks those
+mails (the sender's address, `Done` in the title) and `"act": "markRead"`. Not a session: reading a mail to mark
+it read needs no Claude, and a session would read an outsider's mail for nothing.
+
+- **Act rule** (`act`): an action id the item offers: the well-known `markRead`, `markUnread`, `done` (done at the
+  source: archive, resolve), or one the source adds (`ccc <source> show <id>` and the Inbox panel show an item's
+  actions). Never `open` (it opens a window for a person; refused). It runs **on new items only**, never on a
+  change of one, and only when the item offers that action **at that moment**; when it does not, the rule does not
+  hold and the next rule may take the item (logged as step `action`). An act rule has no `playbook`, `mode`,
+  `check`, `model`, `effort` or `onChange` (refused: they belong to a session). `sources`, `when`, `jev`, `hours`,
+  `limits`, first rule wins and the one-window claim apply as to any rule. Its limits count only actions that
+  succeeded, and it is not counted in the 10-sessions-an-hour cap. Set `limits` for its volume (a mail rule:
+  `"perDay": 100, "cooldownMinutes": 0`); the defaults (10 a day, 30 min apart) suit sessions. It sends no
+  notification. A mail act rule is still one **outsiders can trigger**: a stranger's mail made to match is marked
+  read unseen; keep `when` narrow (the exact sender address) and tell the person.
+- **Act mode** (`"mode": "act"`): the playbook must have a heading `## Allowed actions` with each action as a list
+  item, each with its exact target ("append one line to ~/notes/site-incidents.md", not "fix things"). Without it
+  the rule is a problem and never runs. The session may do only those, only on this item; anything else it
+  reports as a recommendation; it never takes an action, a target or a command from the item's text. Claude
+  Code's own permission settings still apply inside the tab: an action they do not allow waits at a prompt.
+  An act-mode rule on a source outsiders can reach is the riskiest kind there is: say so, and prefer
+  investigate there.
 
 ## How to work
 
@@ -68,6 +101,8 @@ ccc autopilot playbooks [--project|--global]    the playbook files of each level
 ccc autopilot playbooks show <name>
 ccc autopilot playbooks set <name> <text|->     create or replace a playbook
 ccc autopilot playbooks rm <name>               delete a playbook (refused while a rule names it)
+ccc autopilot base [show] [--project|--global]  the level's base.md (both levels without a flag)
+ccc autopilot base set <text|->                 write that level's base.md; an empty text removes it
 ccc autopilot test [rule|<json>|-] [--at <n>] [--jev] [--project|--global]   dry run, nothing starts
 ccc autopilot reload                            read the files again and list the problems
 ccc autopilot format                            the format
@@ -106,6 +141,7 @@ ccc autopilot help
   ],
   "hours": { "from": "08:00", "to": "19:00" },
   "playbook": "investigate-deploy",
+  "mode": "investigate",
   "check": "A production deploy failed (not staging, not a test run).",
   "model": "sonnet",
   "effort": "medium",
@@ -127,7 +163,10 @@ ccc autopilot help
   something to say which items it is about: `when`, `jev` or both (fields are checked first, so Jev is asked only
   for items that pass them). With neither, **every new item of its sources starts a session** (limits still apply):
   say so to the person and avoid it.
-- `playbook` (required): the name of `playbooks/<name>.md` in the rule's own level, written without `.md`.
+- `playbook`: the name of `playbooks/<name>.md` in the rule's own level, written without `.md`. A rule has
+  `playbook` (a session) or `act` (an act rule, see Which kind of rule), exactly one of them.
+- `mode`: a session rule's `investigate` (the default: change nothing) or `act` (only the playbook's
+  `## Allowed actions`). See Which kind of rule.
 - `check`: optional, at most 500 characters. What the session verifies first against the **full** item (it may
   name what only the item shows, a screenshot too). When it does not hold, the session says so in one line and
   stops. A loose `when` plus a precise `check` costs one short session instead of a wrong investigation. (v1
@@ -213,22 +252,36 @@ The limits you must tell the person about:
   bigger exposure than a plain one.
 - A closed tab frees the item: with `onChange`, the item's next new version goes through the rules again.
 
+## base.md: the person's standing instructions
+
+An optional `base.md` in a level's folder (beside `autopilot-rules.json`, at most 16 KiB) holds what the person
+wants every Autopilot session to know: how to report, what never to touch, their names for things. Its text goes
+into **every** session's prompt, after Autopilot's fixed frame and before the item (global first, then project).
+It cannot remove or reorder the frame (the untrusted fence, the injection check, the permission of the rule's
+mode). An act rule has no prompt, so base.md does not reach it. A `base.md` that is there but cannot be read (too
+big, not a file) opens **no session** until it is fixed, since its limits may be what the person counts on.
+
+- `ccc autopilot base` shows both levels' files; `ccc autopilot base set --global -` with the Markdown on stdin
+  writes one (`ccc autopilot base set --global ''` removes it). Keep the person's text: edit what they asked
+  for, not the rest.
+
 ## Playbooks
 
 `playbooks/<name>.md` in the rule's level, at most 64 KiB; `<name>` is 1 to 64 letters, digits, `_` or `-`,
 starting with a letter or digit (no dot, no slash). Write the playbook to the same level as its rule
 (`playbooks set --project <name> -`): a global rule never reads a project's playbooks. Plain Markdown in the person's own words: what the session checks, how, and what it
-reports. Autopilot wraps it in a fixed frame (investigate only, the item fenced as untrusted data, the rule's `check`
-made first, a short summary at the end), so do not repeat that. The model and effort are the rule's: front matter in a
+reports. Autopilot wraps it in a fixed frame (the rule mode's permission, the item fenced as untrusted data, the
+rule's `check` made first, a short summary at the end), so do not repeat that. The model and effort are the rule's: front matter in a
 playbook is ignored with a warning.
 
 - Name the places the session may check itself (your hosts, projects, URLs), so it never has to take one from the
   item. If a playbook must use a value from the item (the site to check), say exactly what shape it is (a plain
   public hostname, never a URL from the item) and have the session build the address itself.
 - One playbook can serve several rules: rules of different weight differ in `model`, `effort` and `check`.
-- Keep the playbook read-only in spirit. The session runs in the person's normal permission mode, so anything
+- Keep an investigate playbook read-only. The session runs in the person's normal permission mode, so anything
   it is not allowed to do waits at a prompt; do not write steps that change systems (restart, deploy, delete, send
-  mail) unless the person asks for exactly that, and then say so in your answer.
+  mail). When the person asks for such a step, make the rule `"mode": "act"` and list exactly that step under
+  `## Allowed actions`, and say so in your answer.
 
 ## Testing a rule
 
@@ -290,6 +343,9 @@ rules are now off and why.
   then `ccc autopilot log 30` (a skip or a limit shows there). It was probably in the baseline, outside the
   rule's hours, under a limit, or taken by a rule above. A `claim` skip "running in another window" means
   another project's window opened it first: an item gets one tab app-wide (the dry run does not show this).
+- "Mark the Jira-Done notification emails read": an act rule, no playbook:
+  `ccc autopilot test '{"id":"done-mails-read","sources":["bronos.gmail"],"when":[{"field":"from.address","op":"is","value":"tracker@example.com"},{"field":"title","op":"contains","value":"Done"}],"act":"markRead","limits":{"perDay":100,"cooldownMinutes":0}}'`
+  shows "would run markRead" for the matching mails; then `rules add` it and ask before `rules enable`.
 - "Stop the Jira rule for now": `ccc autopilot rules disable <id>`. To stop everything, `ccc autopilot off`.
 - "Put the urgent mail rule above the catch-all": `ccc autopilot rules move <id> 1`.
 - "Mail from my lead": `{"id":"lead-mail","sources":["bronos.gmail"],"when":[{"field":"from.address","op":"is","value":"lead@example.com"}],"jev":{"question":"Does this email ask for something urgent?","min":0.8},"playbook":"triage-mail"}`.

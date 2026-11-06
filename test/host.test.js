@@ -364,7 +364,9 @@ test('the folder is read fresh on each check: broken, then fixed, with no restar
   assert.deepEqual(t.ctx.lastState().problems, [])
   // A folder that is gone: a problem, never a crash.
   t.ctx.setSettings({ projectFolder: path.join(dir, 'nope') })
-  await settle()
+  // The re-read is real file I/O (the rules file, then base.md since 0.3.0), not only microtasks: wait
+  // for the state it publishes rather than a fixed number of turns.
+  for (let i = 0; i < 50 && !/not found: create it/.test(t.ctx.lastState().problems[0] || ''); i++) await settle()
   assert.match(t.ctx.lastState().problems[0], /not found: create it/)
   t.done()
   removeFolder(dir)

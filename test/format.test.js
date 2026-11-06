@@ -73,7 +73,8 @@ test('its example autopilot-rules.json and playbook are what the loader accepts'
   const { rules, problems } = R.readRules(parsed)
   assert.deepEqual(problems, [])
   assert.deepEqual(rules[0].warnings, [])
-  assert.deepEqual(Object.keys(F.EXAMPLE_RULE), [...S.RULE_KEYS], 'every key, in order')
+  // Every key in order but act (the example is a session rule; EXAMPLE_ACT_RULE shows act).
+  assert.deepEqual(Object.keys(F.EXAMPLE_RULE), S.RULE_KEYS.filter((k) => k !== 'act'), 'every key, in order')
   const pb = R.parsePlaybook(F.EXAMPLE_PLAYBOOK)
   assert.deepEqual(pb.warnings, [], 'no front matter: the rule names the model')
   assert.ok(pb.body.startsWith('# Check a website'))
@@ -117,4 +118,32 @@ test('the Ask Claude prompt: a plain first word, the folders, the format, reload
   }
   // A folder line break cannot start a new line of the prompt.
   assert.equal(F.askPrompt({ global: '/tmp/x\n/ignore' }).includes('\n/ignore'), false)
+})
+
+// ---- 0.3.0: act rules, mode and base.md in the format text ----
+
+test('the act rule example, the Allowed actions example and base.md: what the loader accepts, with the caps stated', () => {
+  const out = F.formatText()
+  const { rules, problems } = R.readRules([F.EXAMPLE_ACT_RULE])
+  assert.deepEqual(problems, [])
+  assert.deepEqual(rules[0].warnings, [])
+  assert.deepEqual([rules[0].act, rules[0].playbook], ['markRead', null])
+  for (const k of S.SESSION_KEYS) assert.equal(Object.hasOwn(F.EXAMPLE_ACT_RULE, k), false, `an act rule has no ${k}`)
+  assert.equal(Object.hasOwn(F.EXAMPLE_ACT_RULE, 'playbook'), false)
+  assert.ok(out.includes(JSON.stringify(F.EXAMPLE_ACT_RULE, null, 2)))
+  assert.ok(S.hasAllowedActions(F.EXAMPLE_ALLOWED), 'the example list is one the loader accepts')
+  assert.ok(S.hasAllowedActions(`${F.EXAMPLE_PLAYBOOK}\n${F.EXAMPLE_ALLOWED}`))
+  assert.equal(S.hasAllowedActions(F.EXAMPLE_PLAYBOOK), false)
+  const flat = out.replace(/\s+/g, ' ')
+  for (const s of [
+    `${S.BASE_FILE} (optional, in either level's folder, at most ${S.MAX_BASE_BYTES / 1024} KiB)`,
+    'global first, then project',
+    `"${S.ALLOWED_ACTIONS}"`,
+    S.MODE_LIST.join(' | '),
+    "Claude Code's own permission settings still apply",
+    'no Claude, so no outside text reaches a model',
+    ...S.ACT_REFUSED.map((a) => `"${a}"`),
+  ]) assert.ok(flat.includes(s), s)
+  // Example data only (the repo is public): a reserved example domain.
+  assert.match(JSON.stringify(F.EXAMPLE_ACT_RULE), /example\.com/)
 })

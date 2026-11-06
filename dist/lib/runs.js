@@ -97,6 +97,9 @@ function recordOf(raw) {
     stopped: raw.stopped === true,
     runId: str(raw.runId, 64),
     takenOver: raw.takenOver === true,
+    // The mode the tab was opened with (0.3.0), for the wording of its deliveries; a record from before
+    // has none and is read as investigate (deliveries then say "still read-only", the cautious side).
+    mode: raw.mode === 'act' ? 'act' : 'investigate',
   }
 }
 

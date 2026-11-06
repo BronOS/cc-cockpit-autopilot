@@ -17,7 +17,7 @@ const { conditionText } = require('./conditions')
 
 // The rule format itself (constants, the check of one rule, readRules) is lib/schema.js, shared
 // with the panel's form and `ccc autopilot format`; this file reads the folder.
-const { RULES_FILE, V1_RULES_FILE, PLAYBOOKS_DIR, LEVELS, MAX_RULES, MAX_RULES_BYTES, MAX_PLAYBOOK_BYTES, LIMIT_DEFAULTS, JEV_MIN_DEFAULT, RULE_ID, PLAYBOOK_NAME, readRules, quote } = S
+const { RULES_FILE, V1_RULES_FILE, PLAYBOOKS_DIR, BASE_FILE, MAX_BASE_BYTES, LEVELS, MAX_RULES, MAX_RULES_BYTES, MAX_PLAYBOOK_BYTES, LIMIT_DEFAULTS, JEV_MIN_DEFAULT, RULE_ID, PLAYBOOK_NAME, readRules, quote } = S
 const DEFAULT_GLOBAL_FOLDER = '~/.config/cc-cockpit-autopilot'
 // The hint for a folder that holds v1's rules.json and no autopilot-rules.json (design-v2 "Migration
 // from v1"): never a problem (no badge, nothing is broken), and the file is never read or written.
@@ -84,21 +84,52 @@ function displayPath(p, home) {
 
 const errText = (e) => (e && e.code === 'ENOENT' ? 'not found' : String((e && e.message) || e).slice(0, 200))
 
+/** The act-mode problem of a playbook with no "Allowed actions" list (schema.js hasAllowedActions). */
+const noAllowedActions = (name) => `mode "act" needs an "${S.ALLOWED_ACTIONS}" section in ${PLAYBOOKS_DIR}/${name}.md (a heading "## ${S.ALLOWED_ACTIONS}" with the actions listed under it as a Markdown list): the session may do only what is listed there`
+
+/**
+ * The level's `base.md` (design-v2 "base.md": the person's standing instructions for every session),
+ * read like a playbook: `{ base, problem }`. `base` is `{ text, size }` or null (no file, or an empty
+ * one); `problem` a line when a file is there but cannot be used (over the cap, not a file, unreadable).
+ * A broken base.md is not dropped quietly: the host opens no session while one is a problem, since the
+ * person's instructions may be the very limits they rely on (an act rule needs no prompt and still runs).
+ */
+async function readBase(folder, fsp) {
+  const file = path.join(folder, BASE_FILE)
+  try {
+    const st = await fsp.stat(file)
+    if (!st.isFile()) throw new Error('not a file')
+    if (st.size > MAX_BASE_BYTES) throw new Error(`over ${MAX_BASE_BYTES / 1024} KiB`)
+    const text = (await fsp.readFile(file, 'utf8')).replace(/^\ufeff/, '').replace(/\r\n?/g, '\n').trim()
+    return { base: text ? { text, size: st.size } : null, problem: null }
+  } catch (e) {
+    if (e && e.code === 'ENOENT') return { base: null, problem: null }
+    return { base: null, problem: `${BASE_FILE}: ${errText(e)}` }
+  }
+}
+
 /**
  * Read one level's folder: autopilot-rules.json, then the playbook of every valid rule. Never throws: a
  * missing folder, file or playbook and broken JSON are problem lines; a rule whose playbook cannot be
  * read is a problem and left out, the others keep working. Resolves
- * `{ level, folder, rules, problems, hint, playbooks: Map<name, { body, model }>, folderState, raw, hash, entries }`:
+ * `{ level, folder, rules, problems, hint, playbooks: Map<name, { body, model }>, base, baseProblem, folderState, raw, hash, entries }`:
  * `folderState` is 'ok' (the rules file was read), 'missing' (no folder), 'noRules' (no rules file) or
  * 'error'; `raw` the parsed file (null when unreadable), `hash` the content hash of the text read
  * (null when there is none), `entries` one record per entry of the file (schema.js readRules, with
  * the playbook problem and the final warnings filled in) for the panel's list. Each rule carries its
  * `level` and its `ref` (`project:r1`). `hint` is V1_HINT when the folder holds a v1 rules.json and
  * no rules file: then the missing file is not a problem either (an old file is not an error).
+ * `base` / `baseProblem` are the level's base.md (readBase), read whatever state the rules file is in.
+ * An act-mode rule whose playbook has no "Allowed actions" list is a problem and left out, like a rule
+ * whose playbook cannot be read. An act rule names no playbook.
  * The problem lines are the file's own; loadLevels puts the level in front.
  */
 async function loadFolder(folder, fsp, level = 'global') {
-  const out = { level, folder, rules: [], problems: [], hint: null, playbooks: new Map(), folderState: 'ok', raw: null, hash: null, entries: [] }
+  const out = { level, folder, rules: [], problems: [], hint: null, playbooks: new Map(), base: null, baseProblem: null, folderState: 'ok', raw: null, hash: null, entries: [] }
+  const b = await readBase(folder, fsp)
+  out.base = b.base
+  out.baseProblem = b.problem
+  if (b.problem) out.problems.push(`${b.problem}; no session opens until it is fixed`)
   const file = path.join(folder, RULES_FILE)
   let src
   try {
@@ -131,7 +162,7 @@ async function loadFolder(folder, fsp, level = 'global') {
   out.entries = entries
   out.problems.push(...problems)
   const bad = new Map()
-  for (const name of new Set(rules.map((r) => r.playbook))) {
+  for (const name of new Set(rules.filter((r) => r.playbook).map((r) => r.playbook))) {
     const pf = path.join(folder, PLAYBOOKS_DIR, `${name}.md`)
     try {
       const st = await fsp.stat(pf)
@@ -147,14 +178,15 @@ async function loadFolder(folder, fsp, level = 'global') {
   for (const entry of entries) {
     const r = entry.rule
     if (!r) continue
-    if (bad.has(r.playbook)) {
-      out.problems.push(`rule ${quote(r.id, 40)}: ${bad.get(r.playbook)}; skipped`)
-      entry.problem = bad.get(r.playbook)
+    const pb = r.playbook ? out.playbooks.get(r.playbook) : null
+    const problem = r.playbook && bad.has(r.playbook) ? bad.get(r.playbook) : r.mode === 'act' && !S.hasAllowedActions(pb.body) ? noAllowedActions(r.playbook) : null
+    if (problem) {
+      out.problems.push(`rule ${quote(r.id, 40)}: ${problem}; skipped`)
+      entry.problem = problem
       entry.rule = null
       continue
     }
-    const pb = out.playbooks.get(r.playbook)
-    const warnings = [...r.warnings, ...pb.warnings.map((w) => `playbook ${r.playbook}: ${w}`)]
+    const warnings = [...r.warnings, ...(pb ? pb.warnings.map((w) => `playbook ${r.playbook}: ${w}`) : [])]
     entry.rule = { ...r, level, ref: S.refOf(level, r.id), warnings }
     out.rules.push(entry.rule)
   }
@@ -184,7 +216,7 @@ async function loadLevels(settings, { home, projectDir, fs: fsp, list }) {
       l.playbookFiles = list ? await list(fsp, folder, l.raw) : []
     } catch (e) {
       // loadFolder answers problems itself; this is the belt for a bug in it.
-      l = { level, folder, rules: [], problems: [`reading the folder failed: ${errText(e)}`], hint: null, playbooks: new Map(), folderState: 'error', raw: null, hash: null, entries: [], playbookFiles: [] }
+      l = { level, folder, rules: [], problems: [`reading the folder failed: ${errText(e)}`], hint: null, playbooks: new Map(), base: null, baseProblem: `reading the folder failed: ${errText(e)}`, folderState: 'error', raw: null, hash: null, entries: [], playbookFiles: [] }
     }
     out.levels[level] = l
     out.rules.push(...l.rules)
@@ -194,7 +226,7 @@ async function loadLevels(settings, { home, projectDir, fs: fsp, list }) {
   return out
 }
 
-/** A rule in one line for the panel and the CLI: its sources, conditions, Jev, playbook, model and limits. */
+/** A rule in one line for the panel and the CLI: its sources, conditions, Jev, what it does (a playbook and its mode and model, or the item action), limits. */
 function summaryOf(rule) {
   const parts = [rule.sources.includes(S.ANY_SOURCE) ? 'any source' : rule.sources.join(' or ')]
   if (rule.when.length) parts.push(rule.when.map(conditionText).join(' and '))
@@ -202,7 +234,8 @@ function summaryOf(rule) {
   if (rule.jev) parts.push(`Jev ≥ ${rule.jev.min}`)
   if (rule.hours) parts.push(`hours ${S.hoursLabel(rule.hours)}`)
   const lim = `${rule.limits.perDay}/day${rule.limits.cooldownMinutes ? `, ${rule.limits.cooldownMinutes} min cooldown` : ''}${rule.onChange ? ', again on change' : ''}`
-  const run = [rule.model, rule.effort].filter(Boolean).join(' ')
+  if (rule.act) return `${parts.join(', ')} · runs ${rule.act} on new items (no session) · ${lim}`
+  const run = [rule.mode === 'act' ? 'act mode' : '', rule.model, rule.effort].filter(Boolean).join(' ')
   return `${parts.join(', ')} · playbook ${rule.playbook}${run ? ` (${run})` : ''} · ${lim}`
 }
 
@@ -212,6 +245,8 @@ module.exports = {
   RULES_FILE,
   V1_RULES_FILE,
   PLAYBOOKS_DIR,
+  BASE_FILE,
+  MAX_BASE_BYTES,
   MAX_RULES,
   MAX_RULES_BYTES,
   MAX_PLAYBOOK_BYTES,
@@ -222,6 +257,7 @@ module.exports = {
   readRules,
   hashText,
   parsePlaybook,
+  readBase,
   expandFolder,
   levelFolder,
   displayPath,

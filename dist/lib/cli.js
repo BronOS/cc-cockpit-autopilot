@@ -10,7 +10,8 @@ const LOG_DEFAULT = 20
 const LOG_MAX = 200
 const MAX_TITLE = 100
 
-const HELP = `ccc autopilot: start a Claude session when a feed item matches one of your rules (bronos.autopilot)
+const HELP = `ccc autopilot: when a feed item matches one of your rules, start a Claude session on it, or run one of
+the item's own actions with no session (bronos.autopilot)
 
   ccc autopilot [status]           on or off, the rules folders, the rules, problems and the last 5 runs
   ccc autopilot on                 switch on: items in the feeds now are the baseline, only new or changed ones fire
@@ -41,6 +42,12 @@ const HELP = `ccc autopilot: start a Claude session when a feed item matches one
   ccc autopilot playbooks set <name> <text|->
                                    create or replace a playbook (Markdown; "-" reads stdin)
   ccc autopilot playbooks rm <name>   delete a playbook no rule names
+  ccc autopilot base [show] [--project|--global]
+                                   the level's ${S.BASE_FILE}, your standing instructions for every session (both
+                                   levels without a flag)
+  ccc autopilot base set <text|-> [--project|--global]
+                                   write that level's ${S.BASE_FILE} (Markdown, at most ${S.MAX_BASE_BYTES / 1024} KiB; "-" reads
+                                   stdin; an empty text removes the file)
   ccc autopilot stop <run>         run by an Autopilot session in its own tab: send it no more updates
                                    (accepted only from that run's tab; the session's first message names <run>)
   ccc autopilot help               this text
@@ -54,6 +61,11 @@ every project. Project rules are checked first, then global ones; the first that
 folders exist (a <level>:<id> selector names the level too). A rule's playbook is read from its own level's
 playbooks/. A v1 rules.json is never read: \`ccc autopilot\` notes it, and Claude can port it on request.
 
+A rule has a playbook (a Claude session; "mode": "investigate" changes nothing, "act" may carry out the
+playbook's "${S.ALLOWED_ACTIONS}" only) or an "act" (one of the item's own actions, such as markRead, run by
+Autopilot on new items with no session). ${S.BASE_FILE} in a level's folder goes into every session prompt after
+the fixed frame (global first, then project). \`ccc autopilot format\` has the details.
+
 Edit the files by hand, with Claude, or in the Autopilot panel (Rules and Playbooks). The commands above write
 through the same checks as the panel (a refused edit stores nothing). A <json|-> is the JSON as one quoted
 argument, or "-" to read it from stdin; stdin is read only for a "-" argument. A number is the position in the
@@ -62,7 +74,7 @@ level's ${S.RULES_FILE} as "rules" prints it; digits only is always a position, 
 Claude sessions start on their own: test it first. See the plugin's README.
 `
 
-const USAGE = 'Usage: ccc autopilot [status] | on | off | log [n] | test [rule|<json>|-] [--at <n>] [--jev] [--project|--global] | reload | format | rules [export|add|set|rm|move|enable|disable] [--project|--global] | playbooks [show|set|rm] [--project|--global] | stop <run> | help'
+const USAGE = 'Usage: ccc autopilot [status] | on | off | log [n] | test [rule|<json>|-] [--at <n>] [--jev] [--project|--global] | reload | format | rules [export|add|set|rm|move|enable|disable] [--project|--global] | playbooks [show|set|rm] [--project|--global] | base [show|set] [--project|--global] | stop <run> | help'
 
 /** One line, no control characters (C0, DEL, C1, line and paragraph separators), cut to `max`. */
 function oneLine(s, max) {
@@ -126,6 +138,7 @@ const inputOf = (w) => (w === '-' ? { stdin: true } : { text: w })
 
 const RULES_SUBS = ['list', 'export', 'add', 'set', 'rm', 'move', 'enable', 'disable']
 const PLAYBOOKS_SUBS = ['list', 'show', 'set', 'rm']
+const BASE_SUBS = ['show', 'set']
 
 /** `rules ...` (see HELP). Resolves `{ cmd: 'rules', sub, level?, sel?, input?, at?, to? }` or `{ error }`. */
 function parseRules(all, usage) {
@@ -192,6 +205,21 @@ function parsePlaybooks(all, usage) {
 }
 
 /**
+ * `base [show|set <text|->]` (see HELP): `{ cmd: 'base', sub, level?, input? }` or `{ error }`. A set's
+ * level is checked by the host (writeLevel), as for every write.
+ */
+function parseBase(all, usage) {
+  const f = levelFlag(all, usage)
+  if (f.error) return f
+  const [sub = 'show', ...a] = f.rest
+  if (!BASE_SUBS.includes(sub)) return usage(`unknown base command "${oneLine(sub, 40)}"`)
+  const out = { cmd: 'base', sub, ...(f.level ? { level: f.level } : {}) }
+  if (sub === 'show') return a.length ? usage('base show takes no arguments (add --project or --global for one level)') : out
+  if (a.length !== 1) return usage('base set takes the text (or - for stdin; an empty text removes the file)')
+  return { ...out, input: inputOf(a[0]) }
+}
+
+/**
  * The text of an `{ stdin: true } | { text }` input: stdin as the app handed it (only a `-` argument
  * makes the app read it), else the argument. Resolves `{ text }` or `{ error }` (exit 2).
  */
@@ -235,6 +263,7 @@ function parse(argv) {
   }
   if (cmd === 'rules') return parseRules(rest, usage)
   if (cmd === 'playbooks') return parsePlaybooks(rest, usage)
+  if (cmd === 'base') return parseBase(rest, usage)
   if (cmd === 'test') {
     const f = levelFlag(rest, usage)
     if (f.error) return f
@@ -287,6 +316,8 @@ function entryLine(e) {
   const score = typeof e.score === 'number' ? ` ${e.score.toFixed(2)}` : ''
   // The rules below the item's rule that would have held too (first rule wins: they never ran).
   const also = Array.isArray(e.also) && e.also.length ? `; also matched: ${oneLine(e.also.join(', '), 200)}` : ''
+  // An act rule's action that ran (0.3.0): what it did, "marked read: <title>".
+  if (e.step === 'act' && e.outcome) return `${t} ${oneLine(e.rule, 72)} ${oneLine(e.source, 60)} ${oneLine(e.itemId, 80)}: ${oneLine(e.outcome, 200)}${also}`
   // A run event (a tab closed, a restored tab re-adopted, an early end): a note, neither a fire nor a skip.
   if (e.note) return `${t} ${oneLine(e.rule, 72)} ${oneLine(e.source, 60)} ${oneLine(e.itemId, 80)}: ${oneLine(e.note, 200)}`
   if (e.tabId) return `${t} ${oneLine(e.rule, 72)} ${item}: opened tab ${oneLine(e.tabId, 60)} (${oneLine(e.step, 10)}${score})${also}`
@@ -318,7 +349,9 @@ function rulesBlock(s) {
 /** One level's folder line: where its rules are read from, or why there are none. */
 function folderLine(l) {
   const where = l.level === 'global' ? 'the app setting "Global rules folder" is empty' : 'the project setting "Project rules folder" is empty'
-  return `${l.label} rules: ${l.folder ? oneLine(l.folder, 300) : `none (${where})`}`
+  // Whether the level's base.md is in every session's prompt (a problem one is in the problem lines).
+  const base = l.folder && l.base ? `; ${S.BASE_FILE} in use (${l.base.size} bytes)` : ''
+  return `${l.label} rules: ${l.folder ? oneLine(l.folder, 300) : `none (${where})`}${base}`
 }
 
 function formatStatus(s) {
@@ -409,4 +442,4 @@ function formatPlaybooks(levels) {
   return `${out.join('\n')}\n`
 }
 
-module.exports = { HELP, USAGE, LOG_DEFAULT, MAX_TITLE, RULES_SUBS, PLAYBOOKS_SUBS, oneLine, splitSel, parse, inputText, jsonInput, when, entryLine, formatLog, formatStatus, formatReload, formatDry, formatRules, formatPlaybooks }
+module.exports = { HELP, USAGE, LOG_DEFAULT, MAX_TITLE, RULES_SUBS, PLAYBOOKS_SUBS, BASE_SUBS, oneLine, splitSel, parse, inputText, jsonInput, when, entryLine, formatLog, formatStatus, formatReload, formatDry, formatRules, formatPlaybooks }

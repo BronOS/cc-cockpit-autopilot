@@ -3,7 +3,7 @@
 // edits, git and Claude's edits keep working), so every write here is done by the host, never the
 // panel, and follows the same rules:
 //
-// - Paths are only ever `<folder>/autopilot-rules.json` and `<folder>/playbooks/<name>.md` with `name`
+// - Paths are only ever `<folder>/autopilot-rules.json`, `<folder>/base.md` and `<folder>/playbooks/<name>.md` with `name`
 //   checked against the loader's PLAYBOOK_NAME (no dot, no slash: no `..`, no absolute path). A
 //   name from the panel is never joined unchecked. A v1 `rules.json` in the same folder is never
 //   written: v2 has its own file name (design-v2 "Migration from v1").
@@ -20,7 +20,7 @@
 // - A save rewrites only the entries it edits: every other entry of the file, an invalid one
 //   included, is written back exactly as it was parsed (pretty-printed, 2 spaces, a trailing
 //   newline). A file that is not a JSON list is never rewritten.
-// - Caps: the rules file 512 KiB and 200 rules, a playbook 64 KiB (schema.js, the loader's own).
+// - Caps: the rules file 512 KiB and 200 rules, a playbook 64 KiB, base.md 16 KiB (schema.js, the loader's own).
 
 const crypto = require('node:crypto')
 const path = require('node:path')
@@ -346,8 +346,48 @@ async function deletePlaybook(fs, folder, name, raw) {
   await fs.unlink(file)
 }
 
-/** A new playbook's first text (the rule form's "New playbook…"). */
-const playbookStub = (name) => `# ${name}\n\nWhat the session checks, how, and what it reports. Name the places it may check itself (your hosts, projects), so it never takes one from the item.\n`
+/**
+ * A new playbook's first text (the rule form's "New playbook…"). For an act-mode rule it has the
+ * "Allowed actions" heading with a comment and no list item, so the rule stays a problem ("needs an
+ * Allowed actions section") until the person lists what the session may do: a stub never grants one.
+ */
+const playbookStub = (name, mode) =>
+  `# ${name}\n\nWhat the session checks, how, and what it reports. Name the places it may check itself (your hosts, projects), so it never takes one from the item.\n${mode === 'act' ? `\n## ${S.ALLOWED_ACTIONS}\n\n<!-- One action per line as a Markdown list ("- ..."), each with its exact target. The session may do only these, on this item only; anything else it reports as a recommendation. -->\n` : ''}`
+
+// ---- base.md: the person's standing instructions for every session of the level ----
+
+/** `<folder>/base.md` now: `{ exists, body, hash }` (body '' and hash null when there is none); a link or an oversized file is refused. */
+async function readBase(fs, folder) {
+  const file = path.join(folder, S.BASE_FILE)
+  const st = await checkTarget(fs, file, S.BASE_FILE)
+  if (!st) return { exists: false, body: '', hash: null }
+  if (st.size > S.MAX_BASE_BYTES) refuse(`${S.BASE_FILE} is over ${kib(S.MAX_BASE_BYTES)}: edit it by hand`)
+  const body = await fs.readFile(file, 'utf8')
+  return { exists: true, body, hash: hashText(body) }
+}
+
+/**
+ * Save `<folder>/base.md`: refused unless the file is the one the editor (or the CLI) read, by `hash`
+ * (null: it was absent), so a hand edit is never overwritten; an empty text removes the file. Resolves
+ * the new hash, or null when the file was removed (or was not there).
+ */
+async function writeBase(fs, folder, { body, hash }, randomBytes) {
+  if (typeof body !== 'string') refuse('the text must be a string', { fieldErrors: { body: 'not text' } })
+  const file = path.join(folder, S.BASE_FILE)
+  const st = await checkTarget(fs, file, S.BASE_FILE)
+  const now = st ? hashText(await fs.readFile(file, 'utf8')) : null
+  if (now !== (hash === undefined ? null : hash)) refuse(STALE, { stale: true, hash: now })
+  if (!body.trim()) {
+    if (st) await fs.unlink(file)
+    return null
+  }
+  const text = playbookText(body)
+  if (bytes(text) > S.MAX_BASE_BYTES) refuse(`${S.BASE_FILE} is at most ${kib(S.MAX_BASE_BYTES)}`, { fieldErrors: { body: `over ${kib(S.MAX_BASE_BYTES)}` } })
+  await fs.mkdir(folder, { recursive: true })
+  await checkFolder(fs, folder)
+  await atomicWrite(fs, file, text, { label: S.BASE_FILE, mustNotExist: !st, randomBytes })
+  return hashText(text)
+}
 
 // ---- a new folder ----
 
@@ -411,6 +451,8 @@ module.exports = {
   writePlaybook,
   deletePlaybook,
   playbookStub,
+  readBase,
+  writeBase,
   createFolder,
   addExamples,
 }

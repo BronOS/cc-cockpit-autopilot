@@ -196,7 +196,8 @@ test('the skill: the caps and values it states are the schema\'s', () => {
   const c = S.checkRule(JSON.parse(json))
   assert.deepEqual(c.errors, [], `the example rule must pass checkRule. ${skillFix}`)
   assert.deepEqual(c.warnings, [])
-  assert.deepEqual(Object.keys(JSON.parse(json)), S.RULE_KEYS.filter((k) => k !== 'jev'), 'the example shows every key but jev, in file order')
+  // A session rule: every key but jev and act (a rule has playbook or act, never both), in file order.
+  assert.deepEqual(Object.keys(JSON.parse(json)), S.RULE_KEYS.filter((k) => k !== 'jev' && k !== 'act'), 'the example shows every key but jev and act, in file order')
   for (const m of text.matchAll(/'(\{"id":[^'\n]*\})'/g)) {
     if (m[1].includes('...')) continue // a shape in a command line, not an example
     const r = S.checkRule(JSON.parse(m[1]))

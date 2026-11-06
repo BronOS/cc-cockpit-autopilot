@@ -9,7 +9,10 @@
 //   Pruned after 14 days and capped, so an item listed forever cannot grow the store without end.
 // - `opens`: the time and rule (ref) of every session opened in the last 24 h, for the per-rule `perDay`
 //   and `cooldownMinutes` and the cap of 10 an hour. Per project: a global rule counts its limits in
-//   each project's window separately (each window is its own autopilot).
+//   each project's window separately (each window is its own autopilot). An act rule's successful
+//   action is an entry too, marked `kind: 'act'`: it counts for its own rule's perDay and cooldown, and
+//   never for the cap of 10 sessions an hour, which is the flood stop for Claude sessions (a burst of
+//   mails marked read must not keep the next real alert from opening its session).
 // - `log`: the last 200 runs and the skips worth seeing (design "Panel and CLI").
 //
 // Everything is cached in memory after `load()` and written through; a failed write is logged by the
@@ -35,7 +38,7 @@ function firedOf(raw) {
 }
 function opensOf(raw) {
   if (!Array.isArray(raw)) return []
-  return raw.filter((e) => isObj(e) && typeof e.rule === 'string' && time(e.at) !== null).map((e) => ({ rule: str(e.rule, RULE_REF_MAX), at: e.at }))
+  return raw.filter((e) => isObj(e) && typeof e.rule === 'string' && time(e.at) !== null).map((e) => ({ rule: str(e.rule, RULE_REF_MAX), at: e.at, ...(e.kind === 'act' ? { kind: 'act' } : {}) }))
 }
 function logOf(raw) {
   if (!Array.isArray(raw)) return []
@@ -85,19 +88,25 @@ function createState(storage) {
      * for every rule together), then the rule's day count, then its cooldown.
      */
     limitReason(rule, t) {
-      const lastHour = opens.filter((o) => t - o.at < HOUR).length
-      if (lastHour >= GLOBAL_PER_HOUR) return `${GLOBAL_PER_HOUR} sessions in the last hour (all rules)`
+      // The session cap counts sessions only and holds session rules only (see the header).
+      const what = rule.act ? 'actions' : 'sessions'
+      const one = rule.act ? 'action' : 'session'
+      if (!rule.act) {
+        const lastHour = opens.filter((o) => o.kind !== 'act' && t - o.at < HOUR).length
+        if (lastHour >= GLOBAL_PER_HOUR) return `${GLOBAL_PER_HOUR} sessions in the last hour (all rules)`
+      }
       // The ref when the rule has one (every loaded rule does); a bare id for a rule built by hand in a test.
       const name = rule.ref || rule.id
       const mine = opens.filter((o) => o.rule === name && t - o.at < DAY)
-      if (mine.length >= rule.limits.perDay) return `${mine.length} sessions in 24 h for this rule (perDay ${rule.limits.perDay})`
+      if (mine.length >= rule.limits.perDay) return `${mine.length} ${what} in 24 h for this rule (perDay ${rule.limits.perDay})`
       const last = mine.reduce((m, o) => Math.max(m, o.at), -Infinity)
       const cool = rule.limits.cooldownMinutes * 60000
-      if (cool > 0 && t - last < cool) return `cooldown: the last session for this rule was ${Math.max(0, Math.floor((t - last) / 60000))} min ago (cooldownMinutes ${rule.limits.cooldownMinutes})`
+      if (cool > 0 && t - last < cool) return `cooldown: the last ${one} for this rule was ${Math.max(0, Math.floor((t - last) / 60000))} min ago (cooldownMinutes ${rule.limits.cooldownMinutes})`
       return null
     },
-    async recordOpen(ruleId, t) {
-      opens.push({ rule: ruleId, at: t })
+    /** A session opened (or, `kind` 'act', an act rule's action succeeded) for the rule at `t`. */
+    async recordOpen(ruleId, t, kind) {
+      opens.push({ rule: ruleId, at: t, ...(kind === 'act' ? { kind: 'act' } : {}) })
       opens = opens.filter((o) => t - o.at < DAY)
       await save(KEYS.opens, opens)
     },
